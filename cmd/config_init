@@ -1,0 +1,3 @@
+#!/bin/bash
+# videocut: 无额外处理，直接成功
+exit 0

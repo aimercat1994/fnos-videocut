@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>正在返回应用…</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0; height: 100vh; display: flex; align-items: center; justify-content: center;
+      background: #f4f5f7; color: #1c1f23;
+      font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      body { background: #1b1d21; color: #e6e8ea; }
+      .box { background: #23262b !important; border-color: #34383e !important; }
+    }
+    .box {
+      background: #fff; border: 1px solid #e3e5e8; border-radius: 12px;
+      padding: 22px 26px; min-width: 260px; text-align: center;
+    }
+    .t { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+    .s { opacity: .7; font-size: 13px; }
+  </style>
+</head>
+
+<body>
+  <div class="box">
+    <div class="t" id="title">正在返回应用…</div>
+    <div class="s" id="msg">请稍候</div>
+  </div>
+
+  <script>
+    // 飞牛系统授权页（/app-auth/pick-user-file 等）在用户完成选择后会跳回这里，
+    // 参数形如：?status=success&method=pickUserFile&appName=videocut&state=xxx&path=["/a.mp4"]
+    // 本页负责把结果交回打开它的应用窗口，然后自关闭。
+    (function () {
+      var q = new URLSearchParams(location.search);
+      var raw = q.get('path') || q.get('paths') || q.get('data') || '';
+      var paths = [];
+      if (raw) {
+        try {
+          var v = JSON.parse(raw);
+          if (Array.isArray(v)) paths = v.filter(function (x) { return typeof x === 'string'; });
+          else if (typeof v === 'string' && v) paths = [v];
+        } catch (e) {
+          if (raw.charAt(0) === '/') paths = raw.split(',').filter(Boolean);
+        }
+      }
+      var payload = {
+        type: 'vc-pick',
+        status: q.get('status') || (paths.length ? 'success' : 'error'),
+        method: q.get('method') || '',
+        appName: q.get('appName') || '',
+        state: q.get('state') || '',
+        error: q.get('error') || '',
+        paths: paths
+      };
+
+      var ok = payload.status === 'success' && paths.length > 0;
+      document.getElementById('title').textContent = ok ? '已选择 ' + paths.length + ' 项' : '未完成选择';
+      document.getElementById('msg').textContent = ok
+        ? (payload.method === 'pickUserFile' && q.get('directory') !== 'true' ? '正在返回应用…' : '正在返回应用…')
+        : (payload.error === 'access_denied' ? '你取消了授权' : '没有选择任何项目');
+
+      try { localStorage.setItem('vc.pick.result', JSON.stringify(payload)); } catch (e) { /* 隐私模式下可能被拒 */ }
+      try {
+        if (window.opener && !window.opener.closed) window.opener.postMessage(payload, location.origin);
+      } catch (e) { /* 应用会通过轮询 localStorage 拿到结果 */ }
+
+      setTimeout(function () { try { window.close(); } catch (e) { /* ignore */ } }, 700);
+    })();
+  </script>
+</body>
+
+</html>

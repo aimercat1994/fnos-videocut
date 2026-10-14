@@ -1,0 +1,50 @@
+{
+  ".url": {
+    "videocut.main": {
+      "title": "无损剪辑",
+      "desc": "视频无损切割与合并",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "microApp": true,
+      "protocol": "",
+      "gatewayPrefix": "/app/videocut",
+      "gatewaySocket": "app.sock",
+      "url": "/app/videocut/",
+      "width": 1440,
+      "height": 900,
+      "allUsers": true,
+      "control": {
+        "accessPerm": "hidden",
+        "portPerm": "hidden",
+        "pathPerm": "hidden",
+        "fullUrlPerm": "hidden"
+      }
+    },
+    "videocut.open": {
+      "title": "无损剪辑",
+      "desc": "用「无损剪辑」打开",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "microApp": true,
+      "protocol": "",
+      "gatewayPrefix": "/app/videocut",
+      "gatewaySocket": "app.sock",
+      "url": "/app/videocut/",
+      "width": 1440,
+      "height": 900,
+      "allUsers": true,
+      "fileTypes": [
+        "mp4", "mkv", "mov", "avi", "flv", "ts", "m2ts", "mts", "webm",
+        "wmv", "mpg", "mpeg", "m4v", "3gp", "vob", "rmvb", "rm", "asf",
+        "ogv", "divx", "f4v", "m2v", "mxf", "dv", "trp", "tp"
+      ],
+      "noDisplay": true,
+      "control": {
+        "accessPerm": "hidden",
+        "portPerm": "hidden",
+        "pathPerm": "hidden",
+        "fullUrlPerm": "hidden"
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "data-share": {
+    "shares": [
+      {
+        "name": "VideoCut",
+        "permission": {
+          "rw": [
+            "videocut"
+          ]
+        }
+      }
+    ]
+  },
+  "api-scope": [
+    "trim.file.userAccess",
+    "trim.file.userAcl",
+    "trim.file.path"
+  ]
+}

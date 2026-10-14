@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>无损剪辑</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:,">
+<script>
+  window.VC_PREFIX = "__PREFIX__";
+  window.VC_VERSION = "__VERSION__";
+</script>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>无损剪辑</h1>
+    <span class="badge" id="bVersion">v—</span>
+    <span class="badge" id="bFfmpeg">ffmpeg —</span>
+    <span class="badge" id="bUser">—</span>
+    <span class="badge" id="bApi">开放 API —</span>
+    <div class="spacer"></div>
+    <button id="btnPick" class="primary">选择视频…</button>
+    <button id="btnBrowse" title="只浏览已授权给本应用的目录；系统选择器弹窗被拦截或选择器不响应时的兜底入口">授权目录…</button>
+    <button id="btnRefresh" title="重新探测当前文件">刷新</button>
+  </header>
+
+  <main>
+    <div class="col">
+      <div class="card stage">
+        <video id="player" class="player" controls playsinline preload="metadata"></video>
+      </div>
+
+      <div class="card tl">
+        <h2>
+          时间轴
+          <span class="badge" id="kfBadge">关键帧 —</span>
+          <span class="badge" id="durBadge">时长 —</span>
+          <div class="spacer"></div>
+          <label class="check"><input type="checkbox" id="snap" checked> 起点吸附关键帧</label>
+        </h2>
+        <div class="timeline">
+          <div class="strip" id="strip">
+            <div class="kfs" id="kfs"></div>
+            <div class="sel" id="sel"></div>
+            <div class="caret" id="caret"></div>
+            <div class="handle" id="hIn" style="left:0"><span></span></div>
+            <div class="handle" id="hOut" style="left:100%"><span></span></div>
+            <div class="ruler" id="ruler"></div>
+          </div>
+          <div class="row tight">
+            <button class="ghost" id="prevFrame" title="上一帧（快捷键 ←）" disabled>◀ 上一帧</button>
+            <button class="ghost" id="nextFrame" title="下一帧（快捷键 →）" disabled>下一帧 ▶</button>
+            <span class="badge" id="nowBadge">—</span>
+            <span class="badge" id="fpsBadge">— fps</span>
+            <div class="spacer"></div>
+            <span class="hint">←/→ 逐帧 · Shift+←/→ 一秒</span>
+          </div>
+          <div class="row tight">
+            <span class="hint">起点</span>
+            <input type="number" id="inVal" step="0.001" min="0" value="0">
+            <button class="ghost" id="setIn">取当前</button>
+            <span class="hint">终点</span>
+            <input type="number" id="outVal" step="0.001" min="0" value="0">
+            <button class="ghost" id="setOut">取当前</button>
+            <span class="badge" id="selInfo">未选择区间</span>
+            <div class="spacer"></div>
+            <button class="primary" id="addClip" disabled>剪取此区间 → 加入片段</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="card clips">
+        <h2>
+          片段列表 <span class="badge" id="clipCount">0</span>
+          <div class="spacer"></div>
+          <button class="ghost" id="clearClips">清空</button>
+        </h2>
+        <div class="body">
+          <div class="cliplist" id="clipList"></div>
+          <div class="empty" id="clipEmpty">
+            还没有片段。<br>用「选择视频…」添加，或在文件管理器里右键视频 → 打开方式 → 无损剪辑。
+          </div>
+        </div>
+      </div>
+
+      <div class="card export">
+        <h2>导出</h2>
+        <div class="body">
+          <div id="preflight"></div>
+          <div class="row" style="margin-bottom:8px">
+            <span class="hint" style="width:52px">输出到</span>
+            <input type="text" id="outDir" class="mono" placeholder="默认：与源文件相同目录">
+            <button id="btnOutDir">浏览…</button>
+          </div>
+          <div class="row" style="margin-bottom:8px">
+            <span class="hint" style="width:52px">文件名</span>
+            <input type="text" id="outName" placeholder="默认：源文件名 + _cut / _合并">
+            <select id="outExt">
+              <option value="mp4">mp4</option>
+              <option value="mkv">mkv</option>
+              <option value="mov">mov</option>
+              <option value="ts">ts</option>
+              <option value="webm">webm</option>
+            </select>
+          </div>
+          <div class="row tight" style="margin-bottom:10px">
+            <label class="check"><input type="checkbox" id="optKeepAll"> 保留全部轨道（字幕/多音轨）</label>
+            <label class="check"><input type="checkbox" id="optForce"> 参数不一致时仍然合并</label>
+          </div>
+          <button class="primary" id="btnExport" style="width:100%" disabled>开始无损导出</button>
+          <div class="hint" style="margin-top:8px">
+            全程流复制（-c copy），不重新编码。切点会落在关键帧上，因此实际起点可能略早于设定值。
+          </div>
+        </div>
+      </div>
+
+      <div class="card jobs">
+        <h2>任务 <div class="spacer"></div><span class="badge" id="jobCount">0</span></h2>
+        <div class="body"><div class="jobs" id="jobs"></div></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<dialog id="picker">
+  <div class="dh">
+    <strong id="pickTitle">选择文件</strong>
+    <div class="path" id="pickPath"></div>
+  </div>
+  <div class="db" id="pickList"></div>
+  <div class="df">
+    <button id="pickUp">上一层</button>
+    <div class="spacer"></div>
+    <button id="pickCancel">取消</button>
+    <button class="primary" id="pickOk">选择此目录</button>
+  </div>
+</dialog>
+
+<div class="toast" id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

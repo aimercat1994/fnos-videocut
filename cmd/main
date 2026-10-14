@@ -1,0 +1,172 @@
+#!/bin/bash
+# videocut 生命周期脚本
+# 用法: main {start|stop|status|restart}
+# 约定: start/stop 成功返回 0；status 运行中返回 0，未运行返回 3；失败返回 1。
+# 依赖: manifest 中 install_dep_apps=python312 提供 Python 3 运行时。
+
+set -u
+
+APP_NAME="${TRIM_APPNAME:-videocut}"
+PKGVAR="${TRIM_PKGVAR:-/tmp}"
+APPDEST="${TRIM_APPDEST:-/tmp}"
+LOG_FILE="${PKGVAR}/info.log"
+PID_FILE="${PKGVAR}/app.pid"
+SOCKET_PATH="${APPDEST}/app.sock"
+# 安装后 app/ 的内容直接落在 target/ 下：app/server -> target/server，app/www -> target/www
+SERVER_MAIN="${APPDEST}/server/main.py"
+GATEWAY_PREFIX="/app/videocut"
+RUN_USER="${TRIM_RUN_USERNAME:-${TRIM_USERNAME:-}}"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $*" >> "${LOG_FILE}" 2>/dev/null
+}
+
+# 面向用户的错误：写入 TRIM_TEMP_LOGFILE，系统会展示给用户
+fail() {
+    log_msg "ERROR: $*"
+    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+        echo "$*" >> "${TRIM_TEMP_LOGFILE}" 2>/dev/null
+    fi
+    echo "$*" >&2
+}
+
+find_python() {
+    local c
+    for c in /var/apps/python312/target/bin/python3 \
+             /vol1/@appcenter/python312/bin/python3 \
+             /usr/local/bin/python3 \
+             /usr/bin/python3; do
+        [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+    done
+    c="$(command -v python3 2>/dev/null || true)"
+    [ -n "$c" ] && [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+    return 1
+}
+
+read_pid() {
+    [ -r "${PID_FILE}" ] || return 1
+    local p
+    p="$(head -n 1 "${PID_FILE}" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$p" ] || return 1
+    case "$p" in *[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$p"
+}
+
+# 校验 pid 确实属于本应用的服务端，避免 pid 复用误判
+pid_alive() {
+    [ -n "${1:-}" ] || return 1
+    [ -d "/proc/$1" ] || return 1
+    tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | grep -q "server/main.py" || return 1
+    return 0
+}
+
+is_running() {
+    local p
+    p="$(read_pid)" || return 1
+    pid_alive "$p" || return 1
+    return 0
+}
+
+launch() {
+    local py="$1"
+    shift
+    if [ "$(id -u)" = "0" ] && [ -n "${RUN_USER}" ] && [ "${RUN_USER}" != "root" ]; then
+        log_msg "launch as ${RUN_USER}"
+        setsid runuser -u "${RUN_USER}" -- "$py" -u "${SERVER_MAIN}" >>"${LOG_FILE}" 2>&1 &
+    else
+        log_msg "launch as $(id -un 2>/dev/null || echo unknown)"
+        setsid "$py" -u "${SERVER_MAIN}" >>"${LOG_FILE}" 2>&1 &
+    fi
+}
+
+start_process() {
+    if is_running; then
+        log_msg "already running, nothing to do"
+        return 0
+    fi
+
+    rm -f "${PID_FILE}" "${SOCKET_PATH}"
+
+    local py
+    py="$(find_python)" || { fail "未找到 Python 3 运行时，请确认依赖 python312 已安装"; return 1; }
+    [ -f "${SERVER_MAIN}" ] || { fail "服务端文件缺失：${SERVER_MAIN}"; return 1; }
+
+    # 运行时依赖路径（见官方「运行时环境」文档）
+    export PATH="/var/apps/python312/target/bin:${PATH}"
+    export VC_SOCKET="${SOCKET_PATH}"
+    export VC_WWW="${APPDEST}/www"
+    export VC_DATA="${PKGVAR}"
+    export VC_GATEWAY_PREFIX="${GATEWAY_PREFIX}"
+
+    log_msg "starting: py=${py}"
+    launch "${py}"
+
+    # 等待服务端创建 Unix Socket
+    local i=0 p
+    while [ "$i" -lt 40 ]; do
+        if [ -S "${SOCKET_PATH}" ]; then
+            log_msg "socket ready: ${SOCKET_PATH}"
+            return 0
+        fi
+        p="$(read_pid || true)"
+        if [ -n "${p:-}" ] && ! pid_alive "$p"; then
+            fail "服务进程启动后立即退出，详见日志 ${LOG_FILE}"
+            return 1
+        fi
+        sleep 0.5
+        i=$((i + 1))
+    done
+
+    fail "等待 Socket 超时（${SOCKET_PATH}），详见日志 ${LOG_FILE}"
+    return 1
+}
+
+stop_process() {
+    if ! is_running; then
+        log_msg "not running"
+        rm -f "${PID_FILE}" "${SOCKET_PATH}"
+        return 0
+    fi
+
+    local p i=0
+    p="$(read_pid)"
+    log_msg "stopping pid=${p}"
+    kill -TERM "${p}" 2>/dev/null
+
+    while pid_alive "${p}" && [ "$i" -lt 15 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+
+    if pid_alive "${p}"; then
+        log_msg "graceful stop timed out, sending KILL"
+        kill -KILL "${p}" 2>/dev/null
+        sleep 1
+    fi
+
+    rm -f "${PID_FILE}" "${SOCKET_PATH}"
+    log_msg "stopped"
+    return 0
+}
+
+status_process() {
+    if is_running; then
+        log_msg "status: running"
+        return 0
+    fi
+    log_msg "status: not running"
+    return 3
+}
+
+case "${1:-}" in
+    start)   start_process ;;
+    stop)    stop_process ;;
+    status)  status_process ;;
+    restart) stop_process && start_process ;;
+    *)
+        fail "用法: $0 {start|stop|status|restart}"
+        exit 1
+        ;;
+esac
+
+exit $?
