@@ -4,7 +4,7 @@
 
 在飞牛文件管理器里选中视频 → 右键 → **打开方式 → 无损剪辑**，就能直接打开这个工具：拖时间轴、按关键帧标记区间、无损剪切；也可以把多个视频首尾相接合并成一个文件。全程流复制（`-c copy`），**不重新编码、不损失画质、速度接近磁盘拷贝**。
 
-当前版本：**1.0.9**　　运行要求：**fnOS ≥ 1.1.3100**
+当前版本：**1.1.0**　　运行要求：**fnOS ≥ 1.1.3100**
 
 > 项目地址：<https://github.com/aimercat1994/fnos-videocut>　·　问题反馈与建议请提 [Issue](../../issues)
 
@@ -26,6 +26,7 @@
 | 系统文件选择器 | 直接调用 fnOS 原生选择器，可多选、系统自动授予读取权限；也支持系统目录选择器指定输出目录 |
 | 任务进度 | 基于 `ffmpeg -progress` 的实时进度（剪切 65% + 合并 35% 加权）、任务历史、取消、结果下载 |
 | 文件管理器集成 | 注册 26 种视频扩展名到「打开方式」菜单，同时提供桌面图标入口 |
+| 端口访问 | 除网关入口外，还在 `18299` 端口（可改可关）提供同一套界面，浏览器直接打开即可，不必登录飞牛桌面 |
 
 ## 安装
 
@@ -61,10 +62,25 @@ fnpack build -d .
 4. **导出**：在「导出」卡片里确认输出目录（默认与源文件同目录，可用系统目录选择器改到共享目录）、文件名与容器格式，点「开始导出」。
 5. **查看**：任务卡片里显示进度；完成后可直接下载结果或复制文件路径。
 
+## 端口访问（可选）
+
+除了飞牛桌面里的入口，应用还会在 **18299** 端口上提供同一套界面，用普通浏览器直接打开即可：
+
+```text
+http://<飞牛设备 IP>:18299/
+```
+
+- **没有登录态**：端口上的请求不经过飞牛统一网关，不会被注入用户身份，而是按应用用户 `videocut` 的**真实文件权限**工作。界面上会显示「端口访问 · 无登录态」徽标。适合内网自用，**不要把这个端口暴露到公网**。
+- **差异**：系统文件选择器属于飞牛桌面的一部分，端口访问下不可用，请用「授权目录…」浏览应用有权读取的目录；输出目录同理。
+- **改端口 / 关闭**：应用启动前读取环境变量 `VC_PORT`（`0` / `off` 表示关闭端口访问，只保留网关入口）与 `VC_BIND`（默认 `0.0.0.0`，可设为 `127.0.0.1` 只允许本机）。安装版可在这两个位置加一行 `export VC_PORT=...` 后重启应用：`/var/apps/videocut/cmd/main`（或源码里的 `cmd/main`）。
+- 网关入口（飞牛桌面 / 文件管理器「打开方式」）的行为**完全不变**：仍由飞牛校验登录并注入用户身份，权限按登录用户判定。
+
+![端口访问](docs/screen-port.png)
+
 ## 工作原理
 
 - **不重编码**：切割用 `ffmpeg -ss <start> -i <src> -t <dur> -c copy`，合并用 `-f concat -safe 0 -i list -c copy`。因此切点会吸附到关键帧，剪切点不是任意帧——这是无损方案的固有代价，也是它快和不掉画质的原因。
-- **服务端**：纯 Python 标准库（无需第三方依赖），监听应用 `target` 目录下的 Unix Socket，由 fnOS **统一网关**（`/app/videocut`）在校验登录态后转发请求，并注入可信头 `X-Trim-Userid` / `X-Trim-Isadmin` / `X-Trim-Username`。
+- **服务端**：纯 Python 标准库（无需第三方依赖），同时监听两种入口：应用 `target` 目录下的 Unix Socket（由 fnOS **统一网关** `/app/videocut` 校验登录态后转发，并注入可信头 `X-Trim-Userid` / `X-Trim-Isadmin` / `X-Trim-Username`），以及 `18299` 端口（可选的免登录入口，见上一节）。
 - **前端**：原生 HTML/CSS/JS，无构建步骤、无框架，直接由后端作为静态资源提供，并注入网关前缀。
 - **权限**：应用以专用低权用户 `videocut` 运行（`run-as: package`）。除文件系统自身的可读性外，还会通过 fnOS 开放 API（`trim.file.checkUserACL` / `trim.file.userAccess` / `trim.file.path`）按**当前登录用户**复核路径权限；路径统一 realpath 规范化并拒绝 `..` 穿越。
 
@@ -85,7 +101,7 @@ app/server/vc/media.py   ffprobe/ffmpeg 封装：探测、关键帧、缩略图�
 app/server/vc/jobs.py    任务队列与进度（持久化到 jobs.json）
 app/server/vc/grants.py  文件/目录授权登记（系统选择器回传 → 可访问）
 app/server/vc/trimapi.py fnOS 开放 API 客户端（Unix Socket + TRIM_API_TOKEN）
-app/server/vc/httpd.py   Unix Socket 上的 HTTP 服务与路由
+app/server/vc/httpd.py   Unix Socket + 可选 TCP 端口上的 HTTP 服务与路由
 app/www/                 前端（index.html / style.css / app.js / callback.html）
 tools/make_icons.py      纯标准库图标生成器（4× 超采样抗锯齿）
 docs/                    截图

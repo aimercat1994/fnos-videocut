@@ -18,6 +18,7 @@ from .core import (
     DeniedError,
     PathError,
     config,
+    gateway_roots,
     is_dir_readable,
     under_any,
     validate_user_path,
@@ -49,9 +50,49 @@ class Api:
     def __init__(self):
         self.grants = grants.grants()
 
+    def _anonymous(self, user):
+        """端口访问（TCP 端口、无网关鉴权头）：没有登录态。"""
+        return bool(user.get("anonymous"))
+
+    def can_access(self, path, user):
+        """端口访问只看应用用户的真实文件权限，其余走授权表。"""
+        if self._anonymous(user):
+            return os.access(path, os.R_OK)
+        return self.grants.allowed(path, user.get("uid"))
+
+    def roots(self, user):
+        if self._anonymous(user):
+            out = ["/"]
+            for r in gateway_roots():
+                if r not in out:
+                    out.append(r)
+            return out
+        return self.grants.roots_for(user.get("uid"))
+
+    def describe(self, user):
+        if not self._anonymous(user):
+            return self.grants.describe(user.get("uid"))
+        cfg = config()
+        out = []
+        for r in self.roots(user):
+            label = r
+            if r == "/":
+                label = "/（端口访问：按应用用户 %s 的权限列出）" % (cfg.username or "videocut")
+            elif r == cfg.data_dir:
+                label = "%s（应用数据）" % r
+            out.append({"path": r, "label": label})
+        return out
+
     def require(self, raw, user):
-        """校验路径合法、且已授权给当前用户。"""
+        """校验路径合法、且对当前身份可用。"""
         path = validate_user_path(raw)
+        if self._anonymous(user):
+            if not os.access(path, os.R_OK):
+                raise DeniedError(
+                    "端口访问模式下无权读取该路径：本应用以系统用户 %s 的身份运行，"
+                    "只能访问它有权读取的文件。" % (config().username or "videocut")
+                )
+            return path
         if not self.grants.allowed(path, user.get("uid")):
             raise DeniedError(
                 "该路径未授权给本应用。请在文件管理器中右键文件 → 打开方式 → 无损剪辑，"
@@ -71,10 +112,13 @@ class Api:
                 "uid": user.get("uid", ""),
                 "username": user.get("username", ""),
                 "isAdmin": user.get("isAdmin", False),
+                "anonymous": self._anonymous(user),
             },
+            "portMode": self._anonymous(user),
+            "port": {"enabled": bool(cfg.port), "port": cfg.port, "bind": cfg.bind},
             "ffmpeg": media.ffmpeg_version(),
             "openApi": trimapi.status(),
-            "roots": self.grants.describe(user.get("uid")),
+            "roots": self.describe(user),
             "dataDir": cfg.data_dir,
             "shareDir": _default_share_dir(),
         }
@@ -123,12 +167,12 @@ class Api:
         return {
             "accepted": accepted,
             "rejected": rejected,
-            "roots": self.grants.describe(uid),
+            "roots": self.describe(user),
         }
 
     def list_dir(self, raw, only_dirs, user):
         path = validate_user_path(raw)
-        roots = self.grants.roots_for(user.get("uid"))
+        roots = self.roots(user)
         if not under_any(path, roots):
             raise DeniedError("该目录未授权给本应用，请先在文件管理器中打开其中的文件，或授权该目录")
         if not is_dir_readable(path):
@@ -250,10 +294,19 @@ class Handler(BaseHTTPRequestHandler):
         name = (self.headers.get("X-Trim-Username") or "").strip()
         is_admin = (self.headers.get("X-Trim-Isadmin") or "").strip().lower() == "true"
         if not uid:
+            # 端口访问：请求不经过网关鉴权，按应用用户的真实文件权限工作。
+            if getattr(self.server, "anonymous", False):
+                return {"uid": "", "username": "端口访问", "isAdmin": False, "anonymous": True}
             if os.environ.get("VC_DEV"):
                 return {"uid": "0", "username": name or "dev", "isAdmin": True}
             return None
         return {"uid": uid, "username": name, "isAdmin": is_admin}
+
+    def _prefix(self):
+        """端口访问时前端直接挂在站点根目录，使用空前缀。"""
+        if getattr(self.server, "anonymous", False):
+            return ""
+        return config().gateway_prefix
 
     def _send(self, status, body, ctype="application/json; charset=utf-8", extra=None):
         if isinstance(body, str):
@@ -302,7 +355,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
         path = posixpath.normpath(path)
-        prefix = config().gateway_prefix
+        prefix = self._prefix()
         if path == prefix:
             path = "/"
         elif path.startswith(prefix + "/"):
@@ -443,7 +496,7 @@ class Handler(BaseHTTPRequestHandler):
                 html = fh.read()
         except OSError:
             return self._error(500, "前端资源缺失：%s" % index)
-        html = html.replace("__PREFIX__", cfg.gateway_prefix).replace("__VERSION__", cfg.appver)
+        html = html.replace("__PREFIX__", self._prefix()).replace("__VERSION__", cfg.appver)
         return self._send(200, html, "text/html; charset=utf-8")
 
     def _note_opened(self, raw):
@@ -451,7 +504,7 @@ class Handler(BaseHTTPRequestHandler):
         if not raw:
             return
         user = self._user()
-        if not user:
+        if not user or user.get("anonymous"):
             return
         try:
             path = validate_user_path(raw)
@@ -473,7 +526,7 @@ class Handler(BaseHTTPRequestHandler):
     def _thumbnail(self, query, user):
         raw = query.get("path") or ""
         path = validate_user_path(raw)
-        if not self.server.api.grants.allowed(path, user.get("uid")):
+        if not self.server.api.can_access(path, user):
             return self._error(403, "该文件未授权给本应用")
         try:
             t = float(query.get("t") or 0)
@@ -492,7 +545,7 @@ class Handler(BaseHTTPRequestHandler):
         path = validate_user_path(raw)
         if not os.path.isfile(path):
             return self._error(404, "文件不存在")
-        if not self.server.api.grants.allowed(path, user.get("uid")):
+        if not self.server.api.can_access(path, user):
             return self._error(403, "该文件未授权给本应用，请先授予访问权限")
         self._send_file(path, download=download)
 
@@ -622,3 +675,32 @@ def serve_in_thread(socket_path, ready=None):
     t = threading.Thread(target=serve, args=(socket_path, ready), daemon=True)
     t.start()
     return t
+
+
+class TcpHTTPServer(ThreadingHTTPServer):
+    """端口服务：用普通浏览器直接访问，不经过统一网关，因而没有登录态。
+
+    请求按应用用户的真实文件权限工作（见 Handler._user / Api.can_access）。
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 64
+    anonymous = True
+
+    def __init__(self, bind, port):
+        self.api = Api()
+        self.bind_host = bind
+        self.bind_port = port
+        super().__init__((bind, port), Handler)
+
+
+def serve_tcp(bind, port, ready=None):
+    server = TcpHTTPServer(bind, port)
+    if ready:
+        ready(server)
+    LOG.info("listening on tcp %s:%s (no login required)", bind, port)
+    try:
+        server.serve_forever(poll_interval=0.5)
+    finally:
+        server.server_close()

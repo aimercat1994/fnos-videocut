@@ -80,12 +80,36 @@ def main():
     worker.start()
     LOG.info("ready: %s", cfg.socket_path)
 
+    tcp = None
+    tcp_worker = None
+    if cfg.port:
+        try:
+            tcp = httpd.TcpHTTPServer(cfg.bind, cfg.port)
+        except OSError as exc:
+            LOG.warning("端口 %s 无法监听（%s），仅保留统一网关访问", cfg.port, exc)
+            tcp = None
+        else:
+            tcp_worker = threading.Thread(
+                target=tcp.serve_forever, kwargs={"poll_interval": 0.5}, name="tcp", daemon=True
+            )
+            tcp_worker.start()
+            LOG.info(
+                "端口访问已开启：http://%s:%s/（无登录态，请勿暴露到公网）", cfg.bind, cfg.port
+            )
+    else:
+        LOG.info("端口访问已关闭（VC_PORT off），仅统一网关可用")
+
     while not stop.is_set():
         time.sleep(0.5)
 
     server.shutdown()
     worker.join(timeout=5)
     server.server_close()
+    if tcp is not None:
+        tcp.shutdown()
+        if tcp_worker is not None:
+            tcp_worker.join(timeout=5)
+        tcp.server_close()
     try:
         os.unlink(cfg.pid_file)
     except OSError:

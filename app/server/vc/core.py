@@ -31,6 +31,35 @@ def split_paths(value):
     return [p for p in (value or "").split(":") if p]
 
 
+# 端口服务默认端口（manifest 的 service_port 与此一致）
+DEFAULT_PORT = 18299
+
+
+def resolve_port():
+    """端口服务的监听端口。
+
+    VC_PORT 显式覆盖（0/off/none/false 表示关闭）；否则用系统按 manifest 的
+    service_port 注入的 TRIM_SERVICE_PORT；都没有时退回 DEFAULT_PORT。
+    """
+    explicit = (os.environ.get("VC_PORT") or "").strip()
+    if explicit:
+        if explicit.lower() in ("0", "off", "none", "false"):
+            return 0
+        try:
+            return int(explicit)
+        except ValueError:
+            LOG.warning("VC_PORT 不是合法端口：%r，改用默认端口", explicit)
+    injected = (os.environ.get("TRIM_SERVICE_PORT") or "").strip()
+    if injected:
+        try:
+            port = int(injected)
+        except ValueError:
+            port = 0
+        if port:
+            return port
+    return DEFAULT_PORT
+
+
 class Config:
     """一次性读取运行环境。"""
 
@@ -51,6 +80,11 @@ class Config:
         self.data_dir = env("VC_DATA", "TRIM_PKGVAR", default=os.path.join(self.appdest, "data"))
         self.temp_dir = env("TRIM_PKGTMP", default=os.path.join(self.data_dir, "tmp"))
         self.gateway_prefix = env("VC_GATEWAY_PREFIX", default="/app/" + self.appname).rstrip("/")
+
+        # 可选：同时在 TCP 端口上暴露一份，供普通浏览器直接访问（没有登录态）。
+        # 端口上的请求按应用用户的真实文件权限工作，适合内网使用，不要暴露到公网。
+        self.bind = env("VC_BIND", default="0.0.0.0")
+        self.port = resolve_port()
 
         self.uid = env("TRIM_RUN_UID", "TRIM_UID", default="")
         self.gid = env("TRIM_RUN_GID", "TRIM_GID", default="")

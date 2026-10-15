@@ -207,6 +207,12 @@
       $('#bFfmpeg').textContent = ctx.ffmpeg ? 'ffmpeg 可用' : 'ffmpeg 缺失';
       $('#bFfmpeg').className = 'badge ' + (ctx.ffmpeg ? 'ok' : 'err');
       $('#bUser').textContent = (ctx.user.username || '用户') + (ctx.user.isAdmin ? '（管理员）' : '');
+      state.portMode = !!ctx.portMode;
+      if (state.portMode) {
+        $('#bAnon').hidden = false;
+        $('#bUser').hidden = true;  // 端口访问下「端口访问 · 无登录态」已说明身份
+        $('#btnPick').title = '端口访问下用应用内选择器挑文件（系统文件管理器选择器只在飞牛桌面内可用）';
+      }
       var oa = ctx.openApi || {};
       $('#bApi').textContent = oa.tokenPresent && oa.socketExists ? '开放 API 就绪' : '开放 API 未就绪';
       $('#bApi').className = 'badge ' + (oa.tokenPresent && oa.socketExists ? 'ok' : 'warn');
@@ -1086,6 +1092,8 @@
   /* ---- 选择入口 ---- */
 
   function pickVideos() {
+    // 端口访问没有登录态，系统选择器/授权页只在飞牛桌面里存在，直接用应用内浏览。
+    if (state.portMode) { browseFallback(); return; }
     if (!sdkState.usable && window.__VC_FAKE_PICK__ === undefined) {
       if (authPagePick('file')) return;
       browseFallback();
@@ -1120,6 +1128,10 @@
   function pickOutDir() {
     var cur = ($('#outDir').value || '').trim() ||
       (state.cur && state.cur.dir) || (state.ctx && state.ctx.shareDir) || '';
+    if (state.portMode) {
+      openPicker('dir', cur, function (p) { $('#outDir').value = p; });
+      return;
+    }
     if (!sdkState.usable && window.__VC_FAKE_PICK__ === undefined) {
       if (authPagePick('dir')) return;
       openPicker('dir', cur, function (p) { $('#outDir').value = p; });
