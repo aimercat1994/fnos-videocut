@@ -339,3 +339,27 @@ dialog .path { font-family: ui-monospace, monospace; font-size: 12px; color: var
   background: rgba(0, 0, 0, .72); color: #fff; font-size: 13px; line-height: 1.55;
   text-align: center; pointer-events: none; z-index: 3;
 }
+
+/* ---- 播放器模式：双击文件先只播放，点「剪辑」再进入剪辑界面 ---- */
+body.mode-player main {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
+}
+body.mode-player main > .col.right,
+body.mode-player .card.tl { display: none; }
+body.mode-player .col { overflow: hidden; }
+body.mode-player .col > .card.stage {
+  flex: 1 1 auto; height: auto; min-height: 0; max-height: none;
+}
+body.mode-player #bFfmpeg,
+body.mode-player #bApi,
+body.mode-player #bUser { display: none; }
+
+/* 文件名徽标：太长就省略，别把按钮挤到换行 */
+.badge.file {
+  max-width: min(52vw, 640px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
