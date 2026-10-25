@@ -7,6 +7,8 @@
 
   var state = {
     ctx: null,
+    mode: 'edit',       // 'player'：双击文件进来时的纯播放界面；'edit'：剪辑界面
+    kfLoading: false,
     cur: null,          // 当前载入时间轴的文件探测结果
     clips: [],          // {path,name,start,end,duration,ext}
     active: -1,         // 片段列表中正在编辑的下标
@@ -236,12 +238,18 @@
     var params = new URLSearchParams(location.search);
     var p = params.get('path');
     if (p) {
+      // 从文件管理器双击 / 「打开方式」进来：先进播放器界面，点「剪辑」再到剪辑界面
+      setMode('player');
       openFile(p).then(function () {
         if (state.cur) {
           addClip(0, state.duration, true);
         }
-      }).catch(fail);
+      }).catch(function (e) {
+        setMode('edit');    // 打不开就让用户自己挑别的文件
+        fail(e);
+      });
     } else {
+      setMode('edit');
       api('/api/context').then(function () { /* 已由 loadContext 处理 */ }).catch(function () {});
     }
   }
@@ -308,14 +316,50 @@
       applySelection();
       renderClips();
 
-      return api('/api/keyframes?path=' + encodeURIComponent(path)).then(function (res) {
-        state.keyframes = res.keyframes || [];
-        $('#kfBadge').textContent = '关键帧 ' + state.keyframes.length + ' 个';
-        renderKeyframes();
-      }).catch(function () {
-        $('#kfBadge').textContent = '关键帧 不可用';
-      });
+      $('#bFile').textContent = basename(path);
+      $('#bFile').title = path;
+      // 播放器模式下先不读关键帧：双击文件要尽快出画面，点「剪辑」时再读
+      if (state.mode === 'edit') return loadKeyframes(path);
+      $('#kfBadge').textContent = '关键帧 —';
+      return null;
     });
+  }
+
+  /* 关键帧（懒加载：只在剪辑界面需要） */
+  function loadKeyframes(path) {
+    if (state.kfLoading) return null;
+    state.kfLoading = true;
+    $('#kfBadge').textContent = '关键帧 读取中…';
+    return api('/api/keyframes?path=' + encodeURIComponent(path)).then(function (res) {
+      state.keyframes = res.keyframes || [];
+      $('#kfBadge').textContent = '关键帧 ' + state.keyframes.length + ' 个';
+      renderKeyframes();
+    }).catch(function () {
+      $('#kfBadge').textContent = '关键帧 不可用';
+    }).then(function () {
+      state.kfLoading = false;
+    });
+  }
+
+  /* 播放器 / 剪辑 双模式。带 ?path= 双击进来时默认落在播放器模式。 */
+  function setMode(mode) {
+    state.mode = mode === 'player' ? 'player' : 'edit';
+    var player = state.mode === 'player';
+    document.body.classList.toggle('mode-player', player);
+    document.body.classList.toggle('mode-edit', !player);
+    $('#btnEdit').hidden = !player;
+    $('#btnBackPlayer').hidden = player;
+    $('#btnPick').hidden = player;
+    $('#btnBrowse').hidden = player;
+    $('#btnRefresh').hidden = player;
+    $('#bFile').hidden = !player;
+    if (player || !state.cur) return;
+    loadKeyframes(state.cur.path);
+    lastRulerKey = '';
+    renderRuler();
+    renderKeyframes();
+    applySelection();
+    renderClips();
   }
 
   function syncOutDirPlaceholder(info) {
@@ -520,7 +564,7 @@
       var tag = el && el.tagName ? el.tagName.toLowerCase() : '';
       if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
       if ($('#picker') && $('#picker').open) return;
-      if (!state.cur) return;
+      if (!state.cur || state.mode !== 'edit') return;
       e.preventDefault();
       // Shift + 方向键 = 1 秒；单独方向键 = 1 帧
       stepFrame(e.key === 'ArrowLeft' ? -1 : 1, e.shiftKey ? 1 : 0);
@@ -1299,6 +1343,8 @@
   /* ------------------------------------------------------------------ */
 
   function bindButtons() {
+    $('#btnEdit').addEventListener('click', function () { setMode('edit'); });
+    $('#btnBackPlayer').addEventListener('click', function () { setMode('player'); });
     $('#btnPick').addEventListener('click', pickVideos);
     $('#btnBrowse').addEventListener('click', browseFallback);
     $('#btnOutDir').addEventListener('click', pickOutDir);
