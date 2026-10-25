@@ -49,6 +49,52 @@
   }
 
   function streamUrl(file) { return PREFIX + '/api/stream?path=' + encodeURIComponent(file); }
+  function previewUrl(file) { return PREFIX + '/api/preview?path=' + encodeURIComponent(file); }
+
+  var previewToken = 0;
+
+  function previewNote(text) {
+    var el = $('#previewNote');
+    if (!el) return;
+    if (text) { el.textContent = text; el.hidden = false; } else { el.hidden = true; }
+  }
+
+  /* 浏览器放不了的容器（TS/MTS/AVI…）：等后端无损转封装完成后再交给 <video> */
+  function loadPreview(file) {
+    var token = ++previewToken;
+    var secs = 0;
+    previewNote('正在准备预览…（该格式需先无损转封装，首次打开会等几秒）');
+    function poll() {
+      if (token !== previewToken) return;
+      return fetch(previewUrl(file), { method: 'HEAD' }).then(function (res) {
+        if (token !== previewToken) return;
+        if (res.status === 202) {
+          secs++;
+          previewNote('正在准备预览… 已 ' + secs + ' 秒');
+          return new Promise(function (r) { setTimeout(r, 1000); }).then(poll);
+        }
+        if (!res.ok) {
+          if (res.status === 403) throw new Error('该文件未授权给本应用');
+          if (res.status === 404) throw new Error('文件不存在');
+          throw new Error('转封装失败（HTTP ' + res.status + '）');
+        }
+        return res.text().then(function (body) {
+          if (token !== previewToken) return;
+          var msg = '';
+          try { msg = (JSON.parse(body) || {}).error || ''; } catch (e) { /* 正常时是二进制 */ }
+          if (msg) throw new Error(msg);
+          previewNote('');
+          var player = $('#player');
+          player.src = previewUrl(file);
+          player.load();
+        });
+      }).catch(function (e) {
+        if (token !== previewToken) return;
+        previewNote('预览不可用：' + (e.message || e));
+      });
+    }
+    return poll();
+  }
   function thumbUrl(file, t, w) {
     return PREFIX + '/api/thumb?path=' + encodeURIComponent(file) + '&t=' + t + '&w=' + (w || 160);
   }
@@ -234,8 +280,14 @@
       state.keyframes = [];
 
       var player = $('#player');
-      player.src = streamUrl(path);
-      player.load();
+      if (info.needsPreview) {
+        player.removeAttribute('src');
+        player.load();
+        loadPreview(path);
+      } else {
+        player.src = streamUrl(path);
+        player.load();
+      }
 
       $('#durBadge').textContent = '时长 ' + fmtTime(state.duration, true) +
         (info.video ? ' · ' + info.video.codec + ' ' + info.video.width + 'x' + info.video.height : '');
