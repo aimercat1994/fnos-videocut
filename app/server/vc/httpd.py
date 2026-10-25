@@ -49,6 +49,32 @@ class Api:
 
     def __init__(self):
         self.grants = grants.grants()
+        self._previews = {}
+        self._preview_lock = threading.Lock()
+
+    def ensure_preview(self, path):
+        """后台转封装预览副本（同一个文件只会跑一个任务）。"""
+        out = media.preview_path(path)
+        if os.path.exists(out):
+            return out
+        with self._preview_lock:
+            th = self._previews.get(out)
+            if th is not None and th.is_alive():
+                return None
+
+            def work():
+                started = time.time()
+                try:
+                    media.build_preview(path, out)
+                    LOG.info("preview ready in %.1fs: %s", time.time() - started, out)
+                    media.prune_previews()
+                except Exception as exc:
+                    LOG.warning("preview failed for %s: %s", path, exc)
+
+            th = threading.Thread(target=work, name="preview", daemon=True)
+            self._previews[out] = th
+            th.start()
+        return None
 
     def _anonymous(self, user):
         """端口访问（TCP 端口、无网关鉴权头）：没有登录态。"""
@@ -469,6 +495,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/stream" and method == "GET":
             return self._serve_media(query.get("path") or "", False, user)
 
+        if path == "/api/preview" and method == "GET":
+            return self._preview(query.get("path") or "", user)
+
         if path == "/api/download" and method == "GET":
             return self._serve_media(query.get("path") or "", True, user)
 
@@ -518,7 +547,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = fh.read()
         except OSError:
             return self._error(404, "资源不存在")
-        ctype = mimetypes.guess_type(target)[0] or "application/octet-stream"
+        ctype = media.content_type(target)
         if ctype.startswith("text/") or ctype in ("application/javascript", "image/svg+xml"):
             ctype += "; charset=utf-8"
         return self._send(200, body, ctype)
@@ -541,6 +570,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(404, "无法生成缩略图")
         return self._file_response(out)
 
+    def _preview(self, raw, user):
+        """浏览器放不了的容器：返回转封装后的 MP4；还没准备好时回 202。"""
+        path = validate_user_path(raw)
+        if not os.path.isfile(path):
+            return self._error(404, "文件不存在")
+        if not self.server.api.can_access(path, user):
+            return self._error(403, "该文件未授权给本应用，请先授予访问权限")
+        if not media.needs_preview(path):
+            return self._send_file(path)
+        try:
+            out = media.preview_path(path)
+        except OSError as exc:
+            return self._error(500, "无法准备预览：%s" % exc)
+        if not os.path.exists(out):
+            self.server.api.ensure_preview(path)
+            return self._send(202, json.dumps({"state": "building"}))
+        return self._send_file(out)
+
     def _serve_media(self, raw, download, user):
         path = validate_user_path(raw)
         if not os.path.isfile(path):
@@ -555,7 +602,7 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             return self._error(404, "文件不存在")
         total = st.st_size
-        ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        ctype = media.content_type(path)
 
         start, end = 0, max(0, total - 1)
         status = 200

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import subprocess
@@ -19,6 +20,47 @@ VIDEO_EXTS = {
 # mp4 容器能承载的编解码（用于推荐输出容器）
 MP4_VIDEO = {"h264", "hevc", "av1", "mpeg4", "mjpeg", "vp9"}
 MP4_AUDIO = {"aac", "mp3", "ac3", "eac3", "alac", "opus", "mp2"}
+
+# 浏览器 <video> 原生可播放的容器；其余（TS/MTS/AVI/FLV/RMVB…）预览前需无损转封装成 MP4
+PLAYABLE_EXTS = {"mp4", "m4v", "mov", "webm", "mkv", "3gp"}
+
+# 媒体扩展名 → Content-Type（Python 自带映射把 .ts 当成 Qt 语言文件，必须覆盖）
+CTYPES = {
+    "mp4": "video/mp4",
+    "m4v": "video/mp4",
+    "mov": "video/quicktime",
+    "mkv": "video/x-matroska",
+    "webm": "video/webm",
+    "3gp": "video/3gpp",
+    "ts": "video/mp2t",
+    "m2ts": "video/mp2t",
+    "mts": "video/mp2t",
+    "trp": "video/mp2t",
+    "tp": "video/mp2t",
+    "avi": "video/x-msvideo",
+    "divx": "video/x-msvideo",
+    "flv": "video/x-flv",
+    "f4v": "video/mp4",
+    "wmv": "video/x-ms-wmv",
+    "asf": "video/x-ms-asf",
+    "mpg": "video/mpeg",
+    "mpeg": "video/mpeg",
+    "mpe": "video/mpeg",
+    "m2v": "video/mpeg",
+    "mpv": "video/mpeg",
+    "mp2": "video/mpeg",
+    "vob": "video/mpeg",
+    "rmvb": "application/vnd.rn-realmedia-vbr",
+    "rm": "application/vnd.rn-realmedia",
+    "ogv": "video/ogg",
+    "mxf": "application/mxf",
+    "dv": "video/x-dv",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "webp": "image/webp",
+    "gif": "image/gif",
+}
 
 _PROBE_CACHE = {}
 _PROBE_CACHE_LOCK = threading.Lock()
@@ -136,7 +178,8 @@ def _summarize(path, raw):
                     "width": _int(s.get("width")),
                     "height": _int(s.get("height")),
                     "pixFmt": s.get("pix_fmt") or "",
-                    "fps": _fps(s.get("avg_frame_rate") or s.get("r_frame_rate")),
+                    "fps": _fps(s.get("avg_frame_rate") or "")
+                    or _fps(s.get("r_frame_rate") or ""),
                     "timeBase": s.get("time_base") or "",
                     "nbFrames": _int(s.get("nb_frames")),
                     "dvProfile": s.get("dv_profile"),
@@ -181,6 +224,7 @@ def _summarize(path, raw):
         "size": size,
         "mtime": int(st.st_mtime),
         "duration": round(duration, 3),
+        "startTime": round(_float(fmt.get("start_time")), 3),
         "bitRate": bitrate,
         "formatName": fmt.get("format_name") or "",
         "formatLongName": fmt.get("format_long_name") or "",
@@ -196,7 +240,27 @@ def _summarize(path, raw):
         "readable": os.access(path, os.R_OK),
         "writable": os.access(path, os.W_OK),
     }
+    if result["ext"] in PLAYABLE_EXTS:
+        result["needsPreview"] = False
+        result["previewReady"] = True
+    else:
+        result["needsPreview"] = True
+        try:
+            result["previewReady"] = os.path.exists(preview_path(path))
+        except OSError:
+            result["previewReady"] = False
     return result
+
+
+def content_type(path):
+    """按扩展名返回 Content-Type（覆盖 Python 的错误映射，例如 .ts）。"""
+    ext = _ext(path)
+    return CTYPES.get(ext) or mimetypes.guess_type(path)[0] or "application/octet-stream"
+
+
+def needs_preview(path):
+    """浏览器 <video> 放不了这个容器，预览前需要先转封装成 MP4。"""
+    return _ext(path) not in PLAYABLE_EXTS
 
 
 def _ext(path):
@@ -364,6 +428,73 @@ def thumbnail(path, t, width=160):
 # ---------------------------------------------------------------------------
 
 _TIME_RE = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+
+# ---------------------------------------------------------------------------
+# 预览转封装：浏览器放不了的容器（TS/MTS/AVI/FLV/RMVB…）→ 可播放的 MP4
+
+
+def preview_folder():
+    folder = os.path.join(config().thumb_dir, "preview")
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+def preview_path(path):
+    """预览副本的缓存路径（源文件 size/mtime 变化会换新缓存）。"""
+    key = "%s|%s" % (os.path.realpath(path), _stat_key(path))
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:24]
+    return os.path.join(preview_folder(), "%s.mp4" % digest)
+
+
+def prune_previews(keep_days=14):
+    """清掉长期没用的预览副本，避免缓存无限增长。"""
+    try:
+        folder = preview_folder()
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    cutoff = time.time() - keep_days * 86400
+    removed = 0
+    for name in names:
+        if not name.endswith(".mp4"):
+            continue
+        path = os.path.join(folder, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def build_preview(path, out, timeout=3600):
+    """无损转封装（-c copy）成浏览器可播放的 MP4，并保留原始时间轴。"""
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        return out
+    tmp = "%s.%d.part" % (out, os.getpid())
+    args = [
+        _bin("ffmpeg"),
+        "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+        "-fflags", "+genpts", "-i", path,
+        "-map", "0:v:0?", "-map", "0:a:0?",
+        "-c", "copy", "-copyts",
+        "-movflags", "+faststart", "-f", "mp4", tmp,
+    ]
+    rc, _out, err = run(args, timeout=timeout)
+    if rc != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise MediaError(
+            "预览转封装失败：%s"
+            % ((err or "").strip()[:300] or ("ffmpeg 退出码 %s" % rc))
+        )
+    os.replace(tmp, out)
+    return out
 
 
 def fmt_time(sec):

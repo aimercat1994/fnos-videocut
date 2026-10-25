@@ -330,3 +330,12 @@ dialog .path { font-family: ui-monospace, monospace; font-size: 12px; color: var
   background: color-mix(in srgb, var(--warn) 12%, transparent);
   border-radius: 8px; padding: 8px 10px; font-size: 12px; margin-bottom: 8px;
 }
+
+/* 预览转封装提示（TS/MTS/AVI 等浏览器放不了的容器） */
+.card.stage { position: relative; }
+.preview-note {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  max-width: min(90%, 460px); padding: 10px 16px; border-radius: 10px;
+  background: rgba(0, 0, 0, .72); color: #fff; font-size: 13px; line-height: 1.55;
+  text-align: center; pointer-events: none; z-index: 3;
+}
