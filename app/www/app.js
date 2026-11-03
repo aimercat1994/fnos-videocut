@@ -22,6 +22,7 @@
     timer: null,
     pfTimer: null,
     drag: null,
+    previewEscalated: false,   // 本文件是否已经因为「浏览器解码失败」升级过转码预览
     picker: { mode: 'file', path: '', parent: '', onPick: null, onlyDirs: false }
   };
 
@@ -51,7 +52,16 @@
   }
 
   function streamUrl(file) { return PREFIX + '/api/stream?path=' + encodeURIComponent(file); }
-  function previewUrl(file) { return PREFIX + '/api/preview?path=' + encodeURIComponent(file); }
+  function previewUrl(file, mode) {
+    var url = PREFIX + '/api/preview?path=' + encodeURIComponent(file);
+    if (mode) url += '&mode=' + encodeURIComponent(mode);
+    return url;
+  }
+  function previewStatusUrl(file, mode) {
+    var url = PREFIX + '/api/preview/status?path=' + encodeURIComponent(file);
+    if (mode) url += '&mode=' + encodeURIComponent(mode);
+    return url;
+  }
 
   var previewToken = 0;
 
@@ -61,41 +71,71 @@
     if (text) { el.textContent = text; el.hidden = false; } else { el.hidden = true; }
   }
 
-  /* 浏览器放不了的容器（TS/MTS/AVI…）：等后端无损转封装完成后再交给 <video> */
-  function loadPreview(file) {
+  /* 预览副本：容器浏览器不支持（TS/AVI/MKV…）时后端无损转封装；
+     码流本身浏览器解不了（坏帧、10bit…）时后端转码一份 H.264/AAC 兼容版。
+     源文件全程不动，剪切/合并依旧是对原文件做 -c copy。 */
+  function loadPreview(file, mode) {
     var token = ++previewToken;
-    var secs = 0;
-    previewNote('正在准备预览…（该格式需先无损转封装，首次打开会等几秒）');
-    function poll() {
+    var encode = mode === 'encode';
+    var started = Date.now();
+    var reason = '';
+    previewNote(encode
+      ? '正在生成兼容预览…（这个文件的码流浏览器解不了，需要转码一次，源文件不会被改动）'
+      : '正在准备预览…（该格式需先无损转封装，首次打开会等几秒）');
+
+    function note(progress, elapsed) {
+      var pct = Math.round(Number(progress) || 0);
+      var secs = Math.max(1, Math.round(elapsed || (Date.now() - started) / 1000));
+      var head = encode ? '正在生成兼容预览…' : '正在准备预览…';
+      var tail = encode ? '（转码中，' + secs + ' 秒）' : ' 已 ' + secs + ' 秒';
+      var detail = reason ? ' · ' + reason : '';
+      previewNote(head + (pct > 0 ? ' ' + pct + '%' : '') + tail + detail);
+    }
+
+    function finish() {
       if (token !== previewToken) return;
-      return fetch(previewUrl(file), { method: 'HEAD' }).then(function (res) {
+      previewNote('');
+      var player = $('#player');
+      player.src = previewUrl(file, encode ? 'encode' : '');
+      player.load();
+    }
+
+    function pollStatus() {
+      if (token !== previewToken) return;
+      return fetch(previewStatusUrl(file, encode ? 'encode' : '')).then(function (res) {
         if (token !== previewToken) return;
-        if (res.status === 202) {
-          secs++;
-          previewNote('正在准备预览… 已 ' + secs + ' 秒');
-          return new Promise(function (r) { setTimeout(r, 1000); }).then(poll);
-        }
-        if (!res.ok) {
-          if (res.status === 403) throw new Error('该文件未授权给本应用');
-          if (res.status === 404) throw new Error('文件不存在');
-          throw new Error('转封装失败（HTTP ' + res.status + '）');
-        }
-        return res.text().then(function (body) {
-          if (token !== previewToken) return;
-          var msg = '';
-          try { msg = (JSON.parse(body) || {}).error || ''; } catch (e) { /* 正常时是二进制 */ }
-          if (msg) throw new Error(msg);
-          previewNote('');
-          var player = $('#player');
-          player.src = previewUrl(file);
-          player.load();
-        });
-      }).catch(function (e) {
+        if (!res.ok) throw new Error('查询预览进度失败（HTTP ' + res.status + '）');
+        return res.json();
+      }).then(function (st) {
         if (token !== previewToken) return;
-        previewNote('预览不可用：' + (e.message || e));
+        if (st.reason) reason = st.reason;
+        if (st.state === 'ready' || st.state === 'play') return finish();
+        if (st.state === 'failed') throw new Error(st.error || '预览生成失败');
+        note(st.progress, st.elapsed);
+        return new Promise(function (r) { setTimeout(r, 1000); }).then(pollStatus);
       });
     }
-    return poll();
+
+    /* 第一次请求：202 = 已开始生成（注意 202 也是 res.ok，必须先判状态码）；
+       2xx 表示现成可用，此时不读响应体，避免把整个视频拉进内存 */
+    return fetch(previewUrl(file, encode ? 'encode' : '')).then(function (res) {
+      if (token !== previewToken) return;
+      if (res.status === 202) {
+        return res.json().then(function (body) {
+          if (token !== previewToken) return;
+          if (body && body.reason) reason = body.reason;
+          note(body && body.progress, body && body.elapsed);
+          return new Promise(function (r) { setTimeout(r, 700); }).then(pollStatus);
+        });
+      }
+      if (res.ok) return finish();
+      if (res.status === 403) throw new Error('该文件未授权给本应用');
+      if (res.status === 404) throw new Error('文件不存在');
+      throw new Error('预览生成失败（HTTP ' + res.status + '）');
+    }).catch(function (e) {
+      if (token !== previewToken) return;
+      previewNote('预览不可用：' + (e.message || e));
+    });
   }
   function thumbUrl(file, t, w) {
     return PREFIX + '/api/thumb?path=' + encodeURIComponent(file) + '&t=' + t + '&w=' + (w || 160);
@@ -288,10 +328,11 @@
       state.keyframes = [];
 
       var player = $('#player');
+      state.previewEscalated = false;
       if (info.needsPreview) {
         player.removeAttribute('src');
         player.load();
-        loadPreview(path);
+        loadPreview(path, info.previewMode === 'encode' ? 'encode' : '');
       } else {
         player.src = streamUrl(path);
         player.load();
@@ -526,6 +567,15 @@
       }
     });
     player.addEventListener('error', function () {
+      var info = state.cur;
+      // 容器探测说「能播」但浏览器解码器不认（坏帧 / 不支持的码流参数）：
+      // 升级成转码预览再试一次，源文件仍然不动。
+      if (info && info.path && !state.previewEscalated) {
+        state.previewEscalated = true;
+        toast('浏览器解不了这个文件的码流，正在生成兼容预览…');
+        loadPreview(info.path, 'encode');
+        return;
+      }
       toast('无法播放该文件（可仍然进行无损导出）', true);
     });
 

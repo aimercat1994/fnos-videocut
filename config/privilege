@@ -3,5 +3,6 @@
     "run-as": "package"
   },
   "username": "videocut",
-  "groupname": "videocut"
+  "groupname": "videocut",
+  "join-groups": ["video", "render"]
 }

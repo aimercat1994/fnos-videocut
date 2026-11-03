@@ -44,6 +44,10 @@ mimetypes.add_type("image/svg+xml", ".svg")
 mimetypes.add_type("application/wasm", ".wasm")
 
 
+class _NeedEncode(Exception):
+    """转封装副本浏览器放不了：升级为转码预览。"""
+
+
 class Api:
     """与传输层无关的业务实现，便于单独测试。"""
 
@@ -52,24 +56,61 @@ class Api:
         self._previews = {}
         self._preview_lock = threading.Lock()
 
-    def ensure_preview(self, path):
-        """后台转封装预览副本（同一个文件只会跑一个任务）。"""
-        out = media.preview_path(path)
+    def ensure_preview(self, path, mode="remux"):
+        """后台生成预览副本（同一个文件只会跑一个任务）。
+
+        mode=remux 先 -c copy 转封装；转封装失败（容器里的编码 MP4 装不下，
+        或者浏览器还是解不了）时自动退到 mode=encode 重新编码。
+        """
+        mode = "encode" if str(mode or "").lower() == "encode" else "remux"
+        out = media.preview_path(path, mode)
         if os.path.exists(out):
             return out
         with self._preview_lock:
-            th = self._previews.get(out)
-            if th is not None and th.is_alive():
-                return None
+            # 同一个文件不管在做转封装还是转码，都不要再起第二个任务
+            # （两个 ffmpeg 写同一个 .part 文件会互相踩坏）
+            for key in (out, media.preview_path(path, "remux"),
+                        media.preview_path(path, "encode")):
+                th = self._previews.get(key)
+                if th is not None and th.is_alive():
+                    return None
 
             def work():
                 started = time.time()
+                target = out
                 try:
-                    media.build_preview(path, out)
-                    LOG.info("preview ready in %.1fs: %s", time.time() - started, out)
+                    if mode == "encode":
+                        media.build_encode_preview(path, target)
+                    else:
+                        try:
+                            media.build_preview(path, target)
+                        except media.MediaError as exc:
+                            LOG.info("remux preview failed for %s (%s)，改用转码", path, exc)
+                            raise _NeedEncode()
+                        # 转封装只改容器：源码流里如果有浏览器解不了的帧，副本照样放不了。
+                        # 这里直接严格解码校验一次，不行就当场升级为转码，别让用户先看到黑屏。
+                        ok, bad = media.decode_probe(target)
+                        if not ok:
+                            LOG.info(
+                                "remux preview unplayable for %s (第一个问题帧约在第 %s 秒)，改用转码",
+                                path, bad,
+                            )
+                            raise _NeedEncode()
+                    LOG.info("preview ready in %.1fs: %s", time.time() - started, target)
                     media.prune_previews()
+                except _NeedEncode:
+                    try:
+                        target = media.preview_path(path, "encode")
+                        media.force_encode(path, media.preview_path(path, "remux"))
+                        media.build_encode_preview(path, target)
+                        LOG.info("encode preview ready in %.1fs: %s", time.time() - started, target)
+                        media.prune_previews()
+                    except Exception as exc:
+                        LOG.warning("preview encode failed for %s: %s", path, exc)
+                        media.set_preview_error(target, exc)
                 except Exception as exc:
                     LOG.warning("preview failed for %s: %s", path, exc)
+                    media.set_preview_error(target, exc)
 
             th = threading.Thread(target=work, name="preview", daemon=True)
             self._previews[out] = th
@@ -243,7 +284,7 @@ class Api:
         return {"path": path, "parent": _parent_within(path, roots), "dirs": dirs, "files": files}
 
     def file_info(self, raw, user):
-        return media.probe(self.require(raw, user))
+        return media.file_info(self.require(raw, user))
 
     def keyframes(self, raw, user):
         path = self.require(raw, user)
@@ -496,7 +537,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_media(query.get("path") or "", False, user)
 
         if path == "/api/preview" and method == "GET":
-            return self._preview(query.get("path") or "", user)
+            return self._preview(
+                query.get("path") or "", user, query.get("mode") or ""
+            )
+
+        if path == "/api/preview/status" and method == "GET":
+            return self._preview_status(
+                query.get("path") or "", user, query.get("mode") or ""
+            )
 
         if path == "/api/download" and method == "GET":
             return self._serve_media(query.get("path") or "", True, user)
@@ -570,23 +618,78 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(404, "无法生成缩略图")
         return self._file_response(out)
 
-    def _preview(self, raw, user):
-        """浏览器放不了的容器：返回转封装后的 MP4；还没准备好时回 202。"""
+    def _preview(self, raw, user, mode=""):
+        """返回浏览器能播的预览副本；容器/码流需要现做时回 202 并给出进度。
+
+        mode: auto（默认，按探测结果决定）/ remux（只转封装）/ encode（强制转码一份兼容版）
+        """
         path = validate_user_path(raw)
         if not os.path.isfile(path):
             return self._error(404, "文件不存在")
         if not self.server.api.can_access(path, user):
             return self._error(403, "该文件未授权给本应用，请先授予访问权限")
-        if not media.needs_preview(path):
-            return self._send_file(path)
         try:
-            out = media.preview_path(path)
-        except OSError as exc:
+            plan = media.preview_plan(path, mode or "auto")
+        except media.MediaError as exc:
             return self._error(500, "无法准备预览：%s" % exc)
-        if not os.path.exists(out):
-            self.server.api.ensure_preview(path)
-            return self._send(202, json.dumps({"state": "building"}))
-        return self._send_file(out)
+        if plan["mode"] == "play":
+            return self._send_file(path)
+        out = plan["out"]
+        if os.path.exists(out):
+            return self._send_file(out)
+        state = media.preview_state(out) or {}
+        if state.get("error"):
+            # 上一次生成失败：这次请求视为重试，清掉失败状态重新排队
+            media.clear_preview_state(out)
+            state = {}
+        if plan["mode"] == "encode":
+            # 走到转码说明浏览器确实放不了这份码流（容器探测说能放也没用），
+            # 记下来，下次打开同一个文件直接走兼容预览。
+            media.mark_needs_encode(path)
+        self.server.api.ensure_preview(path, plan["mode"])
+        state = media.preview_state(out) or state
+        elapsed = 0
+        if state.get("started"):
+            elapsed = int(max(0, time.time() - state["started"]))
+        body = {
+            "state": "building",
+            "mode": plan["mode"],
+            "reason": plan.get("reason") or "",
+            "progress": state.get("progress", 0),
+            "elapsed": elapsed,
+        }
+        return self._send(202, json.dumps(body, ensure_ascii=False))
+
+    def _preview_status(self, raw, user, mode=""):
+        """预览生成的进度查询（不返回视频本体，前端轮询用）。"""
+        path = validate_user_path(raw)
+        if not os.path.isfile(path):
+            return self._error(404, "文件不存在")
+        if not self.server.api.can_access(path, user):
+            return self._error(403, "该文件未授权给本应用，请先授予访问权限")
+        plan = media.preview_plan(path, mode or "auto")
+        if plan["mode"] == "play":
+            return self._json({"state": "play", "ready": True, "progress": 100})
+        out = plan["out"]
+        if os.path.exists(out):
+            return self._json({
+                "state": "ready", "ready": True, "mode": plan["mode"],
+                "reason": plan.get("reason") or "", "progress": 100,
+            })
+        state = media.preview_state(out) or {}
+        if state.get("error"):
+            return self._json({
+                "state": "failed", "mode": plan["mode"],
+                "reason": plan.get("reason") or "", "error": state.get("error"),
+            })
+        elapsed = 0
+        if state.get("started"):
+            elapsed = int(max(0, time.time() - state["started"]))
+        return self._json({
+            "state": "building", "mode": plan["mode"],
+            "reason": plan.get("reason") or "",
+            "progress": state.get("progress", 0), "elapsed": elapsed,
+        })
 
     def _serve_media(self, raw, download, user):
         path = validate_user_path(raw)
