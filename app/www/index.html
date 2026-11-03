@@ -32,8 +32,21 @@
   <main>
     <div class="col">
       <div class="card stage">
-        <video id="player" class="player" controls playsinline preload="metadata"></video>
+        <video id="player" class="player" playsinline preload="metadata"></video>
         <div class="preview-note" id="previewNote" hidden></div>
+        <div class="ctrlbar" id="ctrlbar" hidden>
+          <button type="button" class="ctrl" id="btnPlay" title="播放 / 暂停（空格）" aria-label="播放">▶</button>
+          <span class="ctime" id="tCur">0:00</span>
+          <div class="ctrack" id="ctrack" title="点击或拖动定位（按源文件时长）">
+            <div class="cbuf" id="cBuf"></div>
+            <div class="cplayed" id="cPlayed"></div>
+            <div class="cdrag" id="cDrag" hidden></div>
+          </div>
+          <span class="ctime" id="tDur">0:00</span>
+          <input type="range" class="cvol" id="vol" min="0" max="1" step="0.05" value="1" title="音量" aria-label="音量">
+          <button type="button" class="ctrl" id="btnMute" title="静音" aria-label="静音">🔊</button>
+          <button type="button" class="ctrl" id="btnFull" title="全屏" aria-label="全屏">⛶</button>
+        </div>
       </div>
 
       <div class="card tl">

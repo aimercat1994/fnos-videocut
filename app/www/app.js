@@ -26,6 +26,7 @@
     pvMode: false,             // true = 当前在播「ffmpeg 边转边播」的流
     pvOffset: 0,               // 当前这条流从源文件的第几秒开始
     pvRestarting: 0,           // 最近一次重开流的时间戳，用来防抖
+    barDrag: null,             // 正在拖控制条时占 0-1，松手才真正 seek
     picker: { mode: 'file', path: '', parent: '', onPick: null, onlyDirs: false }
   };
 
@@ -107,6 +108,8 @@
       var player = $('#player');
       player.src = previewUrl(file, encode ? 'encode' : '');
       player.load();
+      var pr = player.play();
+      if (pr && pr.catch) pr.catch(function () {});
     }
 
     function pollStatus() {
@@ -327,6 +330,7 @@
   function boot() {
     loadContext();
     bindTimeline();
+    bindCtrlbar();
     bindButtons();
     bindPicker();
     pollJobs();
@@ -407,6 +411,8 @@
       } else {
         player.src = streamUrl(path);
         player.load();
+        var pr = player.play();          // 双击文件进来就该直接看，和流式预览保持一致
+        if (pr && pr.catch) pr.catch(function () {});
       }
 
       $('#durBadge').textContent = '时长 ' + fmtTime(state.duration, true) +
@@ -428,6 +434,8 @@
       applySelection();
       renderClips();
 
+      showBar(true);
+      updateBar();
       $('#bFile').textContent = basename(path);
       $('#bFile').title = path;
       // 播放器模式下先不读关键帧：双击文件要尽快出画面，点「剪辑」时再读
@@ -590,6 +598,142 @@
     btn.disabled = !state.cur || !(span > 0.001);
   }
 
+  /* ------------------------------------------------------------------ */
+  /* 自绘播放控制条                                                       */
+  /* 原生 <video> 的进度条在流式预览里只能看到「当前这条流」，所以统一自绘： */
+  /* 总时长用探测到的源文件时长，位置用 pvNow()（已换算回源文件时间）。    */
+  /* ------------------------------------------------------------------ */
+
+  function fmtClock(sec) {
+    sec = Math.max(0, Number(sec) || 0);
+    var h = Math.floor(sec / 3600);
+    var m = Math.floor((sec % 3600) / 60);
+    var s = Math.floor(sec % 60);
+    var mm = h ? (m < 10 ? '0' + m : m) : m;
+    return (h ? h + ':' + mm : m) + ':' + (s < 10 ? '0' + s : s);
+  }
+
+  function barPct(t) {
+    var d = state.duration || 0;
+    if (!d) return 0;
+    return Math.min(100, Math.max(0, t / d * 100));
+  }
+
+  function updateBar() {
+    var bar = $('#ctrlbar');
+    if (!bar || bar.hidden || !state.cur) return;
+    var player = $('#player');
+    var d = state.duration || 0;
+    var dragging = state.barDrag != null;
+    var cur = dragging ? state.barDrag * d : pvNow();
+    var played = dragging ? state.barDrag * 100 : barPct(cur);
+    var buf = dragging ? played : barPct(pvBufferedEnd());
+    $('#cPlayed').style.width = played + '%';
+    $('#cBuf').style.width = Math.max(played, buf) + '%';
+    $('#tCur').textContent = fmtClock(cur);
+    $('#tDur').textContent = d ? fmtClock(d) : '--:--';
+    $('#btnPlay').textContent = player.paused ? '▶' : '❚❚';
+    $('#btnPlay').setAttribute('aria-label', player.paused ? '播放' : '暂停');
+    $('#btnMute').textContent = (player.muted || player.volume === 0) ? '🔇' : '🔊';
+  }
+
+  function showBar(on) {
+    var bar = $('#ctrlbar');
+    if (bar) bar.hidden = !on;
+    if (on) updateBar();
+  }
+
+  function bindCtrlbar() {
+    var track = $('#ctrack');
+    var player = $('#player');
+
+    function pctAt(clientX) {
+      var r = track.getBoundingClientRect();
+      if (!r.width) return 0;
+      return Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    }
+    track.addEventListener('pointerdown', function (e) {
+      if (!state.cur) return;
+      e.preventDefault();
+      state.barDrag = pctAt(e.clientX);
+      $('#cDrag').hidden = false;
+      $('#cDrag').style.width = (state.barDrag * 100) + '%';
+      try { track.setPointerCapture(e.pointerId); } catch (err) {}
+      updateBar();
+    });
+    track.addEventListener('pointermove', function (e) {
+      if (state.barDrag == null) return;
+      state.barDrag = pctAt(e.clientX);
+      $('#cDrag').style.width = (state.barDrag * 100) + '%';
+      updateBar();
+    });
+    var endDrag = function (e) {
+      if (state.barDrag == null) return;
+      var pct = state.barDrag;
+      var target = pct * (state.duration || 0);
+      state.barDrag = null;
+      $('#cDrag').hidden = true;
+      try { track.releasePointerCapture(e.pointerId); } catch (err) {}
+      pvSeek(target);          // 松手才定位：流式预览每拖一下都重开 ffmpeg 太浪费
+      setTimeout(updateBar, 60);
+    };
+    track.addEventListener('pointerup', endDrag);
+    track.addEventListener('pointercancel', endDrag);
+
+    $('#btnPlay').addEventListener('click', function () {
+      if (!state.cur) return;
+      if (player.paused) {
+        var p = player.play();
+        if (p && p.catch) p.catch(function () {});
+      } else {
+        player.pause();
+      }
+      setTimeout(updateBar, 60);
+    });
+    $('#btnMute').addEventListener('click', function () {
+      player.muted = !player.muted;
+      if (!player.muted && player.volume === 0) {
+        player.volume = 1;
+        $('#vol').value = 1;
+      }
+      updateBar();
+    });
+    $('#vol').addEventListener('input', function () {
+      player.volume = Number(this.value) || 0;
+      player.muted = player.volume === 0;
+      updateBar();
+    });
+    $('#btnFull').addEventListener('click', function () {
+      var stage = document.querySelector('.stage');
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(function () {});
+      } else if (stage && stage.requestFullscreen) {
+        stage.requestFullscreen().catch(function () {});
+      }
+    });
+    ['play', 'pause', 'volumechange', 'progress', 'durationchange', 'loadedmetadata', 'seeked']
+      .forEach(function (ev) { player.addEventListener(ev, updateBar); });
+    // 流式预览时缓冲会在播放中继续增长，定时刷新一次让进度条跟上
+    setInterval(function () {
+      if (state.cur && state.barDrag == null && !$('#ctrlbar').hidden) updateBar();
+    }, 500);
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== ' ') return;
+      var el = document.activeElement;
+      var tag = el && el.tagName ? el.tagName.toLowerCase() : '';
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || (el && el.isContentEditable)) return;
+      if (!state.cur) return;
+      e.preventDefault();
+      if (player.paused) {
+        var p = player.play();
+        if (p && p.catch) p.catch(function () {});
+      } else {
+        player.pause();
+      }
+    });
+  }
+
   function bindTimeline() {
     var strip = $('#strip');
 
@@ -627,6 +771,7 @@
     var player = $('#player');
     player.addEventListener('timeupdate', function () {
       syncNow(pvNow());
+      updateBar();
     });
     player.addEventListener('loadedmetadata', function () {
       if (!state.pvMode && !state.duration && player.duration && isFinite(player.duration)) {

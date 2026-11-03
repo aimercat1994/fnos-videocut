@@ -363,3 +363,48 @@ body.mode-player #bUser { display: none; }
   text-overflow: ellipsis;
   color: var(--text);
 }
+
+/* 自绘播放控制条：原生 <video> 进度条在流式预览里只能显示「当前这条流」，
+   所以统一换成按源文件时长画的控制条。 */
+.ctrlbar {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; gap: 10px;
+  padding: 26px 14px 10px;
+  background: linear-gradient(to top, rgba(0, 0, 0, .78), rgba(0, 0, 0, .35) 55%, rgba(0, 0, 0, 0));
+  color: #fff; font-size: 12px; user-select: none;
+}
+.ctrlbar[hidden] { display: none; }
+.ctrl {
+  flex: 0 0 auto; width: 30px; height: 30px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 8px; cursor: pointer;
+  background: rgba(255, 255, 255, .14); color: #fff; font-size: 13px; line-height: 1;
+}
+.ctrl:hover { background: rgba(255, 255, 255, .26); }
+.ctrl:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ctime {
+  flex: 0 0 auto; min-width: 52px; text-align: center;
+  font-variant-numeric: tabular-nums; color: rgba(255, 255, 255, .88);
+}
+.ctrack {
+  position: relative; flex: 1 1 auto; height: 22px;
+  display: flex; align-items: center; cursor: pointer; touch-action: none;
+}
+.ctrack::before {
+  content: ""; position: absolute; left: 0; right: 0; height: 6px;
+  border-radius: 3px; background: rgba(255, 255, 255, .24);
+}
+.cbuf, .cplayed, .cdrag {
+  position: absolute; left: 0; height: 6px; border-radius: 3px; width: 0;
+}
+.cbuf { background: rgba(255, 255, 255, .40); }
+.cplayed { background: var(--accent); }
+.cdrag { height: 10px; margin-top: -2px; background: rgba(255, 255, 255, .75); border-radius: 5px; }
+.cvol {
+  flex: 0 0 auto; width: 72px; accent-color: var(--accent);
+  background: transparent; cursor: pointer;
+}
+.stage:fullscreen, .stage:-webkit-full-screen { background: #000; }
+.stage:fullscreen .player, .stage:-webkit-full-screen .player {
+  width: 100vw; height: 100vh; max-height: none;
+}
