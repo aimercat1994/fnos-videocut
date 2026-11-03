@@ -7,6 +7,7 @@ import posixpath
 import re
 import socket
 import socketserver
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -55,6 +56,22 @@ class Api:
         self.grants = grants.grants()
         self._previews = {}
         self._preview_lock = threading.Lock()
+        self._streams = 0
+        self._stream_lock = threading.Lock()
+
+    # -- 边转边播（ffmpeg 当解码器）----------------------------------------
+    def begin_stream(self, limit=4):
+        """占一个实时转码名额：拖动进度会不断重开流，别让宿主机被 ffmpeg 淹掉。"""
+        with self._stream_lock:
+            if self._streams >= limit:
+                return False
+            self._streams += 1
+            return True
+
+    def end_stream(self):
+        with self._stream_lock:
+            if self._streams > 0:
+                self._streams -= 1
 
     def ensure_preview(self, path, mode="remux"):
         """后台生成预览副本（同一个文件只会跑一个任务）。
@@ -546,6 +563,11 @@ class Handler(BaseHTTPRequestHandler):
                 query.get("path") or "", user, query.get("mode") or ""
             )
 
+        if path == "/api/pvstream" and method == "GET":
+            return self._pvstream(
+                query.get("path") or "", user, query.get("start") or "0"
+            )
+
         if path == "/api/download" and method == "GET":
             return self._serve_media(query.get("path") or "", True, user)
 
@@ -690,6 +712,86 @@ class Handler(BaseHTTPRequestHandler):
             "reason": plan.get("reason") or "",
             "progress": state.get("progress", 0), "elapsed": elapsed,
         })
+
+    def _pvstream(self, raw, user, start):
+        """边转边播：ffmpeg 在服务端解码 + 重编码成分片 MP4，直接流给 <video>。
+
+        浏览器自己的解码器解不了坏包，这条路绕开它；start 是新一次请求的起点（秒），
+        前端拖动进度时带新 start 重开一条流即可，不需要先整片转码。
+        """
+        path = validate_user_path(raw)
+        if not os.path.isfile(path):
+            return self._error(404, "文件不存在")
+        if not self.server.api.can_access(path, user):
+            return self._error(403, "该文件未授权给本应用，请先授予访问权限")
+        try:
+            start = max(0.0, float(start or 0))
+        except (TypeError, ValueError):
+            start = 0.0
+
+        api = self.server.api
+        if not api.begin_stream():
+            return self._error(503, "同时进行的实时预览太多，请稍后再试")
+
+        proc = None
+        first = b""
+        enc_used = ""
+        try:
+            # 走到这里说明浏览器确实解不了这份码流，记下来，下次打开直接走流式预览
+            media.mark_needs_encode(path)
+            # 先把第一块数据拿到手再回响应头：硬编起不来（没有 /dev/dri 权限、设备忙）时
+            # 还能换软件编码重来一次，而不是给播放器塞一条空流。
+            for enc, args in media.preview_stream_variants(path, start):
+                try:
+                    candidate = subprocess.Popen(
+                        args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0
+                    )
+                except OSError as exc:
+                    LOG.warning("pvstream spawn failed (%s): %s", enc, exc)
+                    continue
+                chunk = candidate.stdout.read(64 * 1024)
+                if chunk:
+                    proc, first, enc_used = candidate, chunk, enc
+                    break
+                rc = candidate.wait(timeout=30)
+                LOG.warning("pvstream 用 %s 没有输出（退出码 %s），换下一个编码器", enc, rc)
+                try:
+                    candidate.stdout.close()
+                except OSError:
+                    pass
+            if proc is None:
+                return self._error(500, "ffmpeg 无法开始转码，请查看服务端日志")
+
+            LOG.info("pvstream: %s start=%.1f via %s", path, start, enc_used)
+            self.close_connection = True
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(first)
+            while True:
+                chunk = proc.stdout.read(64 * 1024)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # 浏览器关掉了这条流（通常是又拖了一次进度）
+        finally:
+            if proc is not None:
+                if proc.poll() is None:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                    except Exception:
+                        pass
+                try:
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                except Exception:
+                    pass
+            api.end_stream()
 
     def _serve_media(self, raw, download, user):
         path = validate_user_path(raw)

@@ -848,6 +848,51 @@ def _run_with_progress(args, expected, state_key, timeout):
     return rc, err
 
 
+def preview_stream_variants(path, start=0.0):
+    """按优先级返回 [(编码器名, ffmpeg 参数)]：QSV 起不来时自动换 libx264 再试。"""
+    return [
+        (enc, preview_stream_command(path, start, encoder=enc))
+        for enc, _venc in encode_attempts()
+    ]
+
+
+def preview_stream_command(path, start=0.0, encoder=None):
+    """用 ffmpeg 一边解码一边重编码，吐出能直接喂给 <video> 的分片 MP4。
+
+    浏览器自己的 H.264 解码器遇到坏包就整条流水线报错，那就把解码搬到服务端：
+    ffmpeg 解码（顺手把坏帧藏掉）→ H.264/AAC 分片 MP4 → 浏览器只负责渲染。
+    每 0.5 秒 flush 一个分片，所以请求发出后大约 1 秒就能出画面；拖动进度时
+    前端带着新的 start 重新请求一次即可，不需要先整片转码。
+    """
+    enc = encoder or video_encoder()
+    if enc == "h264_qsv":
+        venc = ["-c:v", "h264_qsv", "-global_quality", "24", "-preset", "veryfast"]
+    else:
+        venc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "24"]
+
+    args = [
+        _bin("ffmpeg"), "-hide_banner", "-nostdin", "-loglevel", "error",
+        "-fflags", "+genpts",
+    ]
+    try:
+        start = float(start)
+    except (TypeError, ValueError):
+        start = 0.0
+    if start > 0:
+        # 输入侧 seek：ffmpeg 会从最近的关键帧开始解码并丢掉 start 之前的帧，出画时间只多几十毫秒
+        args += ["-ss", "%.3f" % start]
+    args += ["-i", path, "-map", "0:v:0?", "-map", "0:a:0?"]
+    args += venc + ["-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1"]
+    args += ["-c:a", "aac", "-b:a", "160k", "-ar", "48000"]
+    args += [
+        "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+        "-frag_duration", "500000",
+        "-avoid_negative_ts", "make_zero",
+        "-f", "mp4", "pipe:1",
+    ]
+    return args
+
+
 def fmt_time(sec):
     sec = max(0.0, float(sec))
     h = int(sec // 3600)

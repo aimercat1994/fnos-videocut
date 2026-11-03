@@ -112,7 +112,7 @@ cmd/main                 start / stop / status 生命周期脚本（PID 文件 +
 cmd/*_init *_callback    install / upgrade / uninstall / config 钩子
 app/server/main.py       服务进程入口（创建 socket、写 pid、信号清理）
 app/server/vc/core.py    配置与环境变量、日志、路径校验
-app/server/vc/media.py   ffprobe/ffmpeg 封装：探测、关键帧、缩略图、剪切/合并命令
+app/server/vc/media.py   ffprobe/ffmpeg 封装：探测、关键帧、缩略图、预览（转封装 / 转码 / 边转边播）、剪切/合并命令
 app/server/vc/jobs.py    任务队列与进度（持久化到 jobs.json）
 app/server/vc/grants.py  文件/目录授权登记（系统选择器回传 → 可访问）
 app/server/vc/trimapi.py fnOS 开放 API 客户端（Unix Socket + TRIM_API_TOKEN）
@@ -145,7 +145,7 @@ tail -f /vol1/@appdata/videocut/server.log
 - 合并要求各片段的编码参数一致（分辨率、编码器、像素格式、声道/采样率）。导出前的预检会给出警告，但可以强制继续——参数不一致时部分播放器可能无法正常播放。
 - 目前仅支持视频文件（30 种扩展名）。
 - 浏览器无法直接播放的容器（`.ts` / `.m2ts` / `.avi` / `.flv` / `.rmvb` / `.mkv` 等）需要先生成预览副本，会在应用数据目录里占用与源文件相当的磁盘空间（14 天未使用自动清理）。
-- 有的 MP4 容器、H.264 参数都很标准，但**码流里夹着零星坏包**（例如从央视频按 MP4 直链下载的片源），Chromium 的解码器遇到一个坏包就整体放弃（`PIPELINE_ERROR_DECODE`），而 ffmpeg / VLC 会隐藏坏帧继续播。这类文件在播放器报解码错误时会自动转码一份 H.264/AAC「兼容预览」再播（QSV 硬编，66 分钟 1080p 约 8 分钟），并记住这个结论，下次打开直接走兼容预览；源文件不动、剪切合并仍是 `-c copy`。但**导出的无损片段同样继承这些坏包**，在浏览器类播放器里可能还是放不出来，需要用 ffmpeg 系播放器或另行转码。
+- 有的 MP4 容器、H.264 参数都很标准，但**码流里夹着零星坏包**（例如从央视频按 MP4 直链下载的片源），Chromium 的解码器遇到一个坏包就整体放弃（`PIPELINE_ERROR_DECODE`），而 ffmpeg / VLC 会隐藏坏帧继续播。这类文件会把解码搬到服务端：ffmpeg 边解码边重编码成 H.264/AAC 分片 MP4 流给 `GET /api/pvstream` 的 `<video>`（约 1 秒出画面，拖动进度按新起点重开一条流，1–2 秒），播放器时间轴仍按源文件时间显示，源文件不动、剪切合并仍是 `-c copy`；如果之前已经整片转过一份兼容预览（`/api/preview?mode=encode`），会优先用它。**导出的无损片段同样继承这些坏包**，在浏览器类播放器里可能还是放不出来，需要用 ffmpeg 系播放器或另行转码。
 - 未上架飞牛官方应用中心，通过手动安装 `.fpk` 使用。
 
 ## 第三方组件

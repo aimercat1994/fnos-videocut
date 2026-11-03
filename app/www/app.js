@@ -22,7 +22,10 @@
     timer: null,
     pfTimer: null,
     drag: null,
-    previewEscalated: false,   // 本文件是否已经因为「浏览器解码失败」升级过转码预览
+    previewEscalated: false,   // 本文件是否已经因为「浏览器解码失败」升级过播放方式
+    pvMode: false,             // true = 当前在播「ffmpeg 边转边播」的流
+    pvOffset: 0,               // 当前这条流从源文件的第几秒开始
+    pvRestarting: 0,           // 最近一次重开流的时间戳，用来防抖
     picker: { mode: 'file', path: '', parent: '', onPick: null, onlyDirs: false }
   };
 
@@ -61,6 +64,12 @@
     var url = PREFIX + '/api/preview/status?path=' + encodeURIComponent(file);
     if (mode) url += '&mode=' + encodeURIComponent(mode);
     return url;
+  }
+  /* 边转边播：服务端 ffmpeg 解码 + 重编码成分片 MP4，浏览器只负责渲染。
+     每条流从 start 秒开始，所以播放器时间要加上 state.pvOffset 才等于源文件时间。 */
+  function pvStreamUrl(file, start) {
+    return PREFIX + '/api/pvstream?path=' + encodeURIComponent(file) +
+      '&start=' + encodeURIComponent((Number(start) || 0).toFixed(3));
   }
 
   var previewToken = 0;
@@ -204,6 +213,55 @@
     return label;
   }
 
+  /* 播放器时间 → 源文件时间（流式预览时两者差一个 pvOffset） */
+  function pvNow() {
+    var player = $('#player');
+    return (state.pvMode ? state.pvOffset : 0) + (player.currentTime || 0);
+  }
+  function pvBufferedEnd() {
+    var player = $('#player');
+    try {
+      if (player.buffered && player.buffered.length) {
+        return state.pvOffset + player.buffered.end(player.buffered.length - 1);
+      }
+    } catch (e) { /* 元数据还没到时访问会抛错 */ }
+    return state.pvOffset;
+  }
+
+  /* 服务端 ffmpeg 从 t 秒处重新开一条流（浏览器解不了原片时用） */
+  function startPvStream(t, autoplay) {
+    var player = $('#player');
+    if (!state.cur || !state.cur.path) return;
+    state.pvMode = true;
+    state.pvOffset = Math.max(0, Number(t) || 0);
+    state.pvRestarting = Date.now();
+    previewNote('ffmpeg 正在实时转码这段画面…（拖动进度会从新位置续转，源文件不会被改动）');
+    player.src = pvStreamUrl(state.cur.path, state.pvOffset);
+    player.load();
+    if (autoplay) {
+      var p = player.play();
+      if (p && p.catch) p.catch(function () { /* 浏览器拦了自动播放就让用户点一下 */ });
+    }
+  }
+
+  /* 统一入口：目标时间是源文件时间 */
+  function pvSeek(t) {
+    var player = $('#player');
+    var d = state.duration || 0;
+    t = Math.max(0, Number(t) || 0);
+    if (d > 0) t = Math.min(t, Math.max(0, d - 0.2));
+    if (!state.pvMode) {
+      try { player.currentTime = t; } catch (e) { /* 未加载 */ }
+      return;
+    }
+    var end = pvBufferedEnd();
+    if (t >= state.pvOffset && t <= end - 0.15) {
+      try { player.currentTime = t - state.pvOffset; } catch (e) { /* 未加载 */ }
+      return;
+    }
+    startPvStream(t, !player.paused);
+  }
+
   function syncNow(t) {
     var d = state.duration || 0;
     if (d) $('#caret').style.left = (Math.min(t, d) / d * 100) + '%';
@@ -214,8 +272,8 @@
   function stepFrame(dir, seconds) {
     var player = $('#player');
     if (!state.cur || !player.src) return;
-    var d = state.duration || (isFinite(player.duration) ? player.duration : 0);
-    var cur = player.currentTime || 0;
+    var d = state.duration || (!state.pvMode && isFinite(player.duration) ? player.duration : 0);
+    var cur = pvNow();
     var f = state.fps > 0 ? state.fps : 25;
     var t;
     if (seconds) {
@@ -231,10 +289,10 @@
     if (t < 0) t = 0;
     if (d && t > d) t = d;
     try { player.pause(); } catch (e) { /* 未加载时部分浏览器会抛错 */ }
-    try { player.currentTime = t; } catch (e) { return; }
+    pvSeek(t);
 
     // 浏览器会把 currentTime 吸附到最近可解码的帧，因此以回读值为准
-    var apply = function () { syncNow(player.currentTime); };
+    var apply = function () { syncNow(pvNow()); };
     apply();
     if (player.seeking) {
       var once = function () { player.removeEventListener('seeked', once); apply(); };
@@ -329,10 +387,23 @@
 
       var player = $('#player');
       state.previewEscalated = false;
-      if (info.needsPreview) {
+      state.pvMode = false;
+      state.pvOffset = 0;
+      if (info.previewMode === 'encode') {
+        if (info.previewReady) {
+          // 已经整片转过一份兼容预览：直接用文件，拖动最顺
+          player.src = previewUrl(path, 'encode');
+          player.load();
+        } else {
+          // 没转过就别等了：让服务端 ffmpeg 边解边转，1 秒左右出画面
+          player.removeAttribute('src');
+          player.load();
+          startPvStream(0, true);
+        }
+      } else if (info.needsPreview) {
         player.removeAttribute('src');
         player.load();
-        loadPreview(path, info.previewMode === 'encode' ? 'encode' : '');
+        loadPreview(path, '');
       } else {
         player.src = streamUrl(path);
         player.load();
@@ -526,7 +597,7 @@
       if (e.target.classList.contains('handle')) return;
       var t = timeAt(e.clientX);
       var player = $('#player');
-      if (player.src) player.currentTime = t;
+      if (player.src) pvSeek(t);
     });
 
     ['hIn', 'hOut'].forEach(function (id) {
@@ -555,10 +626,10 @@
 
     var player = $('#player');
     player.addEventListener('timeupdate', function () {
-      syncNow(player.currentTime);
+      syncNow(pvNow());
     });
     player.addEventListener('loadedmetadata', function () {
-      if (!state.duration && player.duration && isFinite(player.duration)) {
+      if (!state.pvMode && !state.duration && player.duration && isFinite(player.duration)) {
         state.duration = player.duration;
         state.outT = state.duration;
         lastRulerKey = '';
@@ -569,14 +640,27 @@
     player.addEventListener('error', function () {
       var info = state.cur;
       // 容器探测说「能播」但浏览器解码器不认（坏帧 / 不支持的码流参数）：
-      // 升级成转码预览再试一次，源文件仍然不动。
-      if (info && info.path && !state.previewEscalated) {
+      // 改用「ffmpeg 边转边播」，源文件仍然不动。
+      if (info && info.path && !state.pvMode && !state.previewEscalated) {
         state.previewEscalated = true;
-        toast('浏览器解不了这个文件的码流，正在生成兼容预览…');
-        loadPreview(info.path, 'encode');
+        toast('浏览器解不了这个文件的码流，改用 ffmpeg 实时转码预览…');
+        startPvStream(pvNow(), true);
         return;
       }
       toast('无法播放该文件（可仍然进行无损导出）', true);
+    });
+    player.addEventListener('playing', function () {
+      if (state.pvMode) previewNote('');
+    });
+    // 原生播放器控件也能拖进度：拖到当前已转好的区间之外就重开一条流
+    player.addEventListener('seeking', function () {
+      if (!state.pvMode) return;
+      if (Date.now() - state.pvRestarting < 1500) return;
+      var target = state.pvOffset + (player.currentTime || 0);
+      var end = pvBufferedEnd();
+      if (target < state.pvOffset - 0.2 || target > end - 0.15) {
+        startPvStream(target, true);
+      }
     });
 
     $('#inVal').addEventListener('change', function () {
@@ -589,12 +673,12 @@
       applySelection();
     });
     $('#setIn').addEventListener('click', function () {
-      state.inT = $('#player').currentTime || 0;
+      state.inT = pvNow();
       if (state.snap) snapIn();
       applySelection();
     });
     $('#setOut').addEventListener('click', function () {
-      state.outT = $('#player').currentTime || 0;
+      state.outT = pvNow();
       applySelection();
     });
     $('#snap').addEventListener('change', function () {
