@@ -31,6 +31,14 @@ def split_paths(value):
     return [p for p in (value or "").split(":") if p]
 
 
+def dir_writable(path):
+    """目录存在且当前进程可写可进入。"""
+    try:
+        return bool(path) and os.path.isdir(path) and os.access(path, os.W_OK | os.X_OK)
+    except OSError:  # pragma: no cover - 路径异常时按不可写处理
+        return False
+
+
 # 端口服务默认端口（manifest 的 service_port 与此一致）
 DEFAULT_PORT = 18299
 
@@ -116,6 +124,18 @@ class Config:
                 os.makedirs(d, exist_ok=True)
             except OSError:  # pragma: no cover
                 pass
+
+        # fnOS 的 TRIM_PKGTMP 指向 /vol1/@apptemp（只有 root 能进），低权用户
+        # 建不了子目录，导出任务会在创建临时目录时直接失败；这里回落到数据目录。
+        if not dir_writable(self.temp_dir):
+            fallback = os.path.join(self.data_dir, "tmp")
+            try:
+                os.makedirs(fallback, exist_ok=True)
+            except OSError:  # pragma: no cover
+                pass
+            if dir_writable(fallback):
+                LOG.info("临时目录 %s 不可写，改用 %s", self.temp_dir, fallback)
+                self.temp_dir = fallback
 
     @staticmethod
     def _find_bin(name, override):

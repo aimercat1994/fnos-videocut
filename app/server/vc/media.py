@@ -318,6 +318,63 @@ def _fps(v):
 # ---------------------------------------------------------------------------
 
 
+_KF_NEAR_CACHE = {}
+
+
+def keyframes_near(path, t, before=20.0, after=10.0, timeout=30):
+    """只扫描 t 附近一小段，返回其中的关键帧时间点。
+
+    整片 `-skip_frame nokey` 扫描在几分钟的 4K/2K 录像要几十秒，导出请求会
+    看起来「点了没反应」；吸附只需要 t 之前最近的那个关键帧，扫一个 GOP 就够。
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return []
+    t = max(0.0, float(t or 0.0))
+    t0 = max(0.0, t - before)
+    span = (t - t0) + after
+    if span <= 0:
+        return []
+    key = (os.path.realpath(path), st.st_mtime_ns, st.st_size, round(t0, 1), round(span, 1))
+    hit = _KF_NEAR_CACHE.get(key)
+    if hit is not None:
+        return list(hit)
+    try:
+        rc, out, err = run(
+            [
+                _bin("ffprobe"),
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-skip_frame", "nokey",
+                "-read_intervals", "%.3f%%+%.3f" % (t0, span),
+                "-show_frames",
+                "-show_entries", "frame=pts_time",
+                "-of", "csv=p=0",
+                path,
+            ],
+            timeout=timeout,
+        )
+    except MediaError:
+        return []
+    if rc != 0:
+        LOG.info("keyframes_near failed for %s: %s", path, err.strip()[:200])
+        return []
+    times = []
+    for line in out.splitlines():
+        # 央视/直播录像的关键帧带 SEI 边数据，csv 行会变成 "578.718000,H.26[45] ..."
+        tok = line.split(",", 1)[0].strip()
+        try:
+            times.append(round(float(tok), 3))
+        except ValueError:
+            continue
+    times.sort()
+    if len(_KF_NEAR_CACHE) > 512:
+        _KF_NEAR_CACHE.clear()
+    _KF_NEAR_CACHE[key] = tuple(times)
+    return times
+
+
 def keyframes(path, limit=400, timeout=90):
     """返回视频关键帧时间点（秒）。失败返回 []。"""
     try:

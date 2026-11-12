@@ -11,7 +11,7 @@ import time
 import uuid
 
 from . import media
-from .core import LOG, config, gateway_roots, under_any, validate_user_path, PathError
+from .core import LOG, config, dir_writable, gateway_roots, under_any, validate_user_path, PathError
 
 MAX_HISTORY = 60
 _SAFE_NAME = re.compile(r"[^\w\u4e00-\u9fff .\-()\[\]（）\[\]]+", re.UNICODE)
@@ -76,10 +76,13 @@ def plan(clips, snap_keyframes=True):
 
         snapped_from = None
         if snap_keyframes and dur > 0 and start > 0.001:
-            kfs = media.keyframes(clip["path"])
+            kfs = media.keyframes_near(clip["path"], start)
+            if not kfs:
+                # 窗口里没扫到（GOP 特别长或读到片尾），放宽一点再试一次
+                kfs = media.keyframes_near(clip["path"], start, before=120.0, after=5.0)
             if kfs:
                 snapped = media.nearest_keyframe(kfs, start, "before")
-                if abs(snapped - start) > 0.001:
+                if snapped is not None and snapped <= start + 1e-6 and abs(snapped - start) > 0.001:
                     snapped_from = start
                     start = snapped
         out.append(
@@ -168,7 +171,12 @@ def _fmt_v(v):
 
 
 def resolve_output_dir(raw, clips):
-    """校验输出目录：必须存在、可写，且在已授权范围内。"""
+    """校验输出目录：必须存在、可写，且在已授权范围内。
+
+    「输出目录留空」优先用源文件同目录；但源目录可能来自只读 ACL 共享（例如
+    别人分享的直播回放目录，应用能读不能写），这时退到应用自己的共享目录，
+    免得默认设置直接报错。
+    """
     allowed_extra = set()
     for c in clips:
         try:
@@ -176,21 +184,43 @@ def resolve_output_dir(raw, clips):
         except PathError:
             pass
 
+    cfg = config()
     if raw:
         out_dir = validate_user_path(raw)
-    else:
-        out_dir = allowed_extra and sorted(allowed_extra)[0] or config().data_dir
+        if not os.path.isdir(out_dir):
+            raise JobError("输出目录不存在：%s" % out_dir)
+        if not dir_writable(out_dir):
+            raise JobError(
+                "应用无权写入该目录：%s。可以把输出目录换成应用共享目录"
+                "（%s），或在文件管理器中先授权该目录。" % (out_dir, _share_hint(cfg))
+            )
+        if not under_any(out_dir, gateway_roots()) and out_dir not in allowed_extra:
+            raise JobError("输出目录不在已授权范围内：%s" % out_dir)
+        return out_dir
 
-    if not os.path.isdir(out_dir):
-        raise JobError("输出目录不存在：%s" % out_dir)
-    if not os.access(out_dir, os.W_OK | os.X_OK):
-        raise JobError(
-            "应用无权写入该目录：%s。可改用应用自己的共享目录（输出目录留空），"
-            "或在文件管理器中先授权该目录。" % out_dir
-        )
-    if not under_any(out_dir, gateway_roots()) and out_dir not in allowed_extra:
-        raise JobError("输出目录不在已授权范围内：%s" % out_dir)
-    return out_dir
+    preferred = sorted(allowed_extra)[0] if allowed_extra else ""
+    if preferred and dir_writable(preferred):
+        return preferred
+    for cand in _output_candidates(cfg):
+        if dir_writable(cand):
+            LOG.info("默认输出目录 %s 不可写，改用 %s", preferred or "(空)", cand)
+            return cand
+    raise JobError("没有可写的输出目录：源目录与共享目录都不可写，请手动指定输出目录。")
+
+
+def _output_candidates(cfg):
+    out = []
+    for p in list(cfg.share_paths) + [os.path.join(cfg.appdest, "share"), cfg.data_dir]:
+        if p and p not in out:
+            out.append(p)
+    return out
+
+
+def _share_hint(cfg):
+    for p in _output_candidates(cfg):
+        if dir_writable(p):
+            return p
+    return "/vol1/@appshare/VideoCut"
 
 
 def unique_output(out_dir, stem, ext, overwrite=False):

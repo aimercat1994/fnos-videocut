@@ -1014,9 +1014,27 @@
   /* 导出与任务                                                           */
   /* ------------------------------------------------------------------ */
 
+  function exportNote(msg, isErr) {
+    var el = $('#exportMsg');
+    if (!el) return;
+    if (!msg) {
+      el.hidden = true;
+      el.textContent = '';
+      return;
+    }
+    el.hidden = false;
+    el.textContent = msg;
+    el.className = 'hint' + (isErr ? ' err' : '');
+  }
+
   function doExport() {
-    if (!state.clips.length) return;
+    if (!state.clips.length) {
+      exportNote('先在时间轴上取一段区间，点「加入片段」再导出。', true);
+      return;
+    }
+    exportNote('');
     $('#btnExport').disabled = true;
+    $('#btnExport').textContent = '正在准备…';
     var ext = $('#outExt').value || 'mkv';
     var name = ($('#outName').value || '').trim();
     var options = {
@@ -1032,12 +1050,20 @@
       options: options
     };
     api('/api/jobs', { method: 'POST', body: payload }).then(function (job) {
-      toast('已开始导出：' + job.output.name);
+      var dir = (job.output && job.output.dir) || '';
+      var srcDir = state.cur ? dirname(state.cur.path) : '';
+      var moved = dir && srcDir && dir !== srcDir;
+      toast('已开始导出：' + job.output.name + (moved ? '（输出到 ' + dir + '）' : ''));
+      if (moved) exportNote('源目录不可写，本次输出到 ' + dir + '。可用「输出到」指定别处。');
       state.jobs.unshift(job);
       renderJobs();
       pollJobs(true);
-    }).catch(fail).then(function () {
+    }).catch(function (err) {
+      fail(err);
+      exportNote((err && err.message) || String(err), true);
+    }).then(function () {
       $('#btnExport').disabled = false;
+      $('#btnExport').textContent = '开始无损导出';
     });
   }
 
